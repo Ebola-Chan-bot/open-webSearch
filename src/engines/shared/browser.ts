@@ -107,24 +107,110 @@ async function launchBrowser(): Promise<BrowserSession> {
     let browserPid: number | undefined;
 
     if (process.platform === 'win32') {
-        // 通过 WMI 启动浏览器，使用 Win32_ProcessStartup 的 ShowWindow=0 (SW_HIDE)
-        // 使窗口完全不可见，用户不会看到弹出的浏览器窗口
+        // 在一个独立的不可见 Win32 Desktop 上启动浏览器。
+        // 通过 CreateProcessW + STARTUPINFO.lpDesktop 直接指定桌面，
+        // 子进程自动继承父进程的桌面，因此 Edge 的所有子进程（GPU、渲染器等）
+        // 都在隐藏桌面上运行，用户桌面上不会出现任何窗口。
+        const desktopName = `mcp-search-${Date.now()}`;
+        // 安全说明：cmdLine 中的 browserPath 来自 getBrowserPath() 的硬编码路径列表，
+        // args 全部是内部生成的常量，desktopName 是时间戳——均无外部输入，不存在注入风险。
+        // 下方 replace(/'/g, "''") 是 PowerShell 单引号字符串的标准转义，作为防御性编码。
         const cmdLine = `"${browserPath}" ${args.join(' ')}`;
-        const psScript = [
-            `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}`,
-            `; $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create`,
-            `-Arguments @{CommandLine='${cmdLine.replace(/'/g, "''")}'; ProcessStartupInformation=$si}`,
-            `; if($r.ReturnValue -eq 0){$r.ProcessId}else{throw "WMI error: $($r.ReturnValue)"}`,
-        ].join(' ');
+        const psScript = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+
+public class HiddenLauncher {
+    [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    static extern IntPtr CreateDesktopW(string lpszDesktop, IntPtr lpszDevice,
+        IntPtr pDevmode, int dwFlags, uint dwDesiredAccess, IntPtr lpsa);
+
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    static extern bool CreateProcessW(string lpApp, string lpCmd,
+        IntPtr lpProcAttr, IntPtr lpThreadAttr, bool bInherit, uint dwFlags,
+        IntPtr lpEnv, string lpDir, ref STARTUPINFOW si, out PROCESS_INFORMATION pi);
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool DuplicateHandle(IntPtr hSourceProcess, IntPtr hSourceHandle,
+        IntPtr hTargetProcess, out IntPtr lpTargetHandle,
+        uint dwDesiredAccess, bool bInheritHandle, uint dwOptions);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInherit, int dwProcId);
+
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr hObject);
+
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    struct STARTUPINFOW {
+        public int cb; public string lpReserved; public string lpDesktop;
+        public string lpTitle; public int dwX; public int dwY;
+        public int dwXSize; public int dwYSize; public int dwXCountChars;
+        public int dwYCountChars; public int dwFillAttribute; public int dwFlags;
+        public short wShowWindow; public short cbReserved2;
+        public IntPtr lpReserved2; public IntPtr hStdInput;
+        public IntPtr hStdOutput; public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION {
+        public IntPtr hProcess; public IntPtr hThread;
+        public int dwProcessId; public int dwThreadId;
+    }
+
+    const uint GENERIC_ALL = 0x10000000;
+    const uint PROCESS_DUP_HANDLE = 0x0040;
+    const uint DUPLICATE_SAME_ACCESS = 0x0002;
+
+    public static int Launch(string cmdLine, string desktopName) {
+        IntPtr hDesk = CreateDesktopW(desktopName, IntPtr.Zero, IntPtr.Zero,
+            0, GENERIC_ALL, IntPtr.Zero);
+        if (hDesk == IntPtr.Zero)
+            throw new Exception("CreateDesktop failed: " +
+                Marshal.GetLastWin32Error());
+
+        var si = new STARTUPINFOW();
+        si.cb = Marshal.SizeOf(si);
+        si.lpDesktop = desktopName;
+
+        PROCESS_INFORMATION pi;
+        if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero,
+            false, 0, IntPtr.Zero, null, ref si, out pi))
+            throw new Exception("CreateProcess failed: " +
+                Marshal.GetLastWin32Error());
+
+        // 将桌面句柄复制到浏览器进程中，使其持有对桌面的引用。
+        // 这样即使当前进程（PowerShell）退出，桌面也不会被销毁。
+        IntPtr hBrowserProc = OpenProcess(PROCESS_DUP_HANDLE, false, pi.dwProcessId);
+        if (hBrowserProc != IntPtr.Zero) {
+            IntPtr dupHandle;
+            DuplicateHandle(GetCurrentProcess(), hDesk,
+                hBrowserProc, out dupHandle,
+                0, false, DUPLICATE_SAME_ACCESS);
+            CloseHandle(hBrowserProc);
+        }
+
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+
+        return pi.dwProcessId;
+    }
+}
+"@
+[HiddenLauncher]::Launch('${cmdLine.replace(/'/g, "''")}', '${desktopName}')`;
         try {
             const output = execFileSync('powershell.exe', [
                 '-NoProfile', '-NonInteractive', '-Command', psScript,
-            ], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+            ], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
             browserPid = parseInt(output.trim());
-            console.error(`[browser] Browser started via WMI, PID: ${browserPid}`);
+            console.error(`[browser] Browser started on hidden desktop "${desktopName}", PID: ${browserPid}`);
         } catch (err: any) {
             try { rmSync(tempDir, { recursive: true, force: true }); } catch {}
-            throw new Error(`通过 WMI 启动浏览器失败: ${err.message}`);
+            throw new Error(`启动浏览器失败: ${err.message}`);
         }
     } else {
         const child = spawn(browserPath, args, {

@@ -11,15 +11,6 @@ export async function searchBaidu(query: string, limit: number): Promise<SearchR
         while (allResults.length < limit) {
             const page = await browser.newPage();
 
-            // 通过 CDP 隐藏 webdriver/自动化特征，绕过百度反爬检测
-            const client = await page.createCDPSession();
-            await client.send('Page.addScriptToEvaluateOnNewDocument', {
-                source: `
-                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    delete navigator.__proto__.webdriver;
-                `
-            });
-
             const searchUrl = `https://www.baidu.com/s?wd=${encodeURIComponent(query)}&pn=${pn}&ie=utf-8`;
 
             await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 15000 });
