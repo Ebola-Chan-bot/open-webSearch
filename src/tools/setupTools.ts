@@ -87,7 +87,7 @@ const validateArticleUrl = (url: string, type: 'linuxdo' | 'csdn' | 'juejin'): b
 
         switch (type) {
             case 'linuxdo':
-                return urlObj.hostname === 'linux.do' && url.includes('.json');
+                return urlObj.hostname === 'linux.do' && /\/t(opic)?\//.test(url);
             case 'csdn':
                 return urlObj.hostname === 'blog.csdn.net' && url.includes('/article/details/');
             case 'juejin':
@@ -185,7 +185,9 @@ export const setupTools = (server: McpServer): void => {
         {
             query: z.string().min(1, "Search query must not be empty"),
             limit: z.number().min(1).max(50).default(10),
-            engines: z.array(getEnginesEnum()).min(1).default([config.defaultSearchEngine])
+            maxDescriptionLength: z.number().min(1).optional()
+                .describe("Maximum length of each result's description. Defaults to the global MAX_DESCRIPTION_LENGTH setting. Omit for no limit."),
+            engines: z.array(z.string().transform(s => s.toLowerCase()).pipe(getEnginesEnum())).min(1).default([config.defaultSearchEngine])
                 .transform(requestedEngines => {
                     // 如果有配置允许的搜索引擎，过滤请求的引擎
                     if (config.allowedSearchEngines.length > 0) {
@@ -200,11 +202,22 @@ export const setupTools = (server: McpServer): void => {
                     return requestedEngines;
                 })
         },
-        async ({query, limit = 10, engines = ['bing']}) => {
+        async ({query, limit = 10, maxDescriptionLength, engines = ['bing']}) => {
             try {
                 console.error(`Searching for "${query}" using engines: ${engines.join(', ')}`);
 
                 const results = await executeSearch(query.trim(), engines, limit);
+
+                // 应用描述长度限制：调用参数 > 全局配置 > 不限制
+                const descLimit = maxDescriptionLength ?? config.maxDescriptionLength;
+                const truncatedResults = descLimit
+                    ? results.map(r => ({
+                        ...r,
+                        description: r.description.length > descLimit
+                            ? r.description.slice(0, descLimit) + '...'
+                            : r.description
+                    }))
+                    : results;
 
                 return {
                     content: [{
@@ -212,8 +225,8 @@ export const setupTools = (server: McpServer): void => {
                         text: JSON.stringify({
                             query: query.trim(),
                             engines: engines,
-                            totalResults: results.length,
-                            results: results
+                            totalResults: truncatedResults.length,
+                            results: truncatedResults
                         }, null, 2)
                     }]
                 };

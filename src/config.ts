@@ -12,6 +12,8 @@ export interface AppConfig {
     corsOrigin: string;
     // Server configuration (determined by MODE env var: 'both', 'http', or 'stdio')
     enableHttpServer: boolean;
+    // 搜索结果描述最大长度（undefined = 不限制）
+    maxDescriptionLength?: number;
 }
 
 // Read from environment variables or use defaults
@@ -30,7 +32,9 @@ export const config: AppConfig = {
     corsOrigin: process.env.CORS_ORIGIN || '*',
     // Server configuration - determined by MODE environment variable
     // Modes: 'both' (default), 'http', 'stdio'
-    enableHttpServer: process.env.MODE ? ['both', 'http'].includes(process.env.MODE) : true
+    enableHttpServer: process.env.MODE ? ['both', 'http'].includes(process.env.MODE) : true,
+    // 搜索结果描述最大长度
+    maxDescriptionLength: process.env.MAX_DESCRIPTION_LENGTH ? parseInt(process.env.MAX_DESCRIPTION_LENGTH, 10) : undefined
 };
 
 // Valid search engines list

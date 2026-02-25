@@ -1,72 +1,78 @@
-import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { SearchResult } from '../../types.js';
+import { getSharedBrowser, destroySharedBrowser } from '../shared/browser.js';
 
 export async function searchBaidu(query: string, limit: number): Promise<SearchResult[]> {
-    let allResults: SearchResult[] = [];
-    let pn = 0;
+    try {
+        const browser = await getSharedBrowser();
+        let allResults: SearchResult[] = [];
+        let pn = 0;
 
-    while (allResults.length < limit) {
-        const response = await axios.get('https://www.baidu.com/s', {
-            params: {
-                wd: query,
-                pn: pn.toString(),
-                ie: "utf-8",
-                mod: "1",
-                isbd: "1",
-                isid: "f7ba1776007bcf9e",
-                oq: query,
-                tn: "88093251_62_hao_pg",
-                usm: "1",
-                fenlei: "256",
-                rsv_idx: "1",
-                rsv_pq: "f7ba1776007bcf9e",
-                rsv_t: "8179fxGiNMUh/0dXHrLsJXPlKYbkj9S5QH6rOLHY6pG6OGQ81YqzRTIGjjeMwEfiYQTSiTQIhCJj",
-                bs: query,
-                rsv_sid: undefined,
-                _ss: "1",
-                f4s: "1",
-                csor: "5",
-                _cr1: "30385",
-            },
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        while (allResults.length < limit) {
+            const page = await browser.newPage();
+
+            // 通过 CDP 隐藏 webdriver/自动化特征，绕过百度反爬检测
+            const client = await page.createCDPSession();
+            await client.send('Page.addScriptToEvaluateOnNewDocument', {
+                source: `
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    delete navigator.__proto__.webdriver;
+                `
+            });
+
+            const searchUrl = `https://www.baidu.com/s?wd=${encodeURIComponent(query)}&pn=${pn}&ie=utf-8`;
+
+            await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+            await new Promise(r => setTimeout(r, 1000));
+
+            const html = await page.content();
+            await page.close();
+
+            const $ = cheerio.load(html);
+
+            // 检测百度安全验证页面
+            const title = $('title').text();
+            if (title.includes('安全验证')) {
+                console.error('⚠️ Baidu security verification detected, no results for this page.');
+                break;
             }
-        });
 
-        const $ = cheerio.load(response.data);
-        const results: SearchResult[] = [];
+            const results: SearchResult[] = [];
 
-        $('#content_left').children().each((i, element) => {
-            const titleElement = $(element).find('h3');
-            const linkElement = $(element).find('a');
-            const snippetElement = $(element).find('.cos-row').first();
+            $('#content_left').children().each((i, element) => {
+                const titleElement = $(element).find('h3');
+                const linkElement = $(element).find('a');
+                const snippetElement = $(element).find('.cos-row').first();
 
-            if (titleElement.length && linkElement.length) {
-                const url = linkElement.attr('href');
-                if (url && url.startsWith('http')) {
-                    const snippetElementBaidu = $(element).find('.c-font-normal.c-color-text').first();
-                    const sourceElement = $(element).find('.cosc-source');
-                    results.push({
-                        title: titleElement.text(),
-                        url: url,
-                        description: snippetElementBaidu.attr('aria-label') || snippetElement.text().trim() || '',
-                        source: sourceElement.text().trim() || '',
-                        engine: 'baidu'
-                    });
+                if (titleElement.length && linkElement.length) {
+                    const url = linkElement.attr('href');
+                    if (url && url.startsWith('http')) {
+                        const snippetElementBaidu = $(element).find('.c-font-normal.c-color-text').first();
+                        const sourceElement = $(element).find('.cosc-source');
+                        results.push({
+                            title: titleElement.text(),
+                            url: url,
+                            description: snippetElementBaidu.attr('aria-label') || snippetElement.text().trim() || '',
+                            source: sourceElement.text().trim() || '',
+                            engine: 'baidu'
+                        });
+                    }
                 }
+            });
+
+            allResults = allResults.concat(results);
+
+            if (results.length === 0) {
+                console.error('⚠️ No more results, ending early....');
+                break;
             }
-        });
 
-        allResults = allResults.concat(results);
-
-        if (results.length === 0) {
-            console.error('⚠️ No more results, ending early....');
-            break;
+            pn += 10;
         }
 
-        pn += 10;
+        return allResults.slice(0, limit);
+    } catch (err) {
+        destroySharedBrowser();
+        throw err;
     }
-
-    return allResults.slice(0, limit); // 截取最多 limit 个
 }

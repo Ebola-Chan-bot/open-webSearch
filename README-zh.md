@@ -3,6 +3,7 @@
 # Open-WebSearch MCP 服务器
 
 [![ModelScope](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/Aas-ee/3af09e0f4c7821fb2e9acb96483a5ff0/raw/badge.json&color=%23de5a16)](https://www.modelscope.cn/mcp/servers/Aasee1/open-webSearch)
+[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/Aas-ee/open-webSearch)](https://archestra.ai/mcp-catalog/aas-ee__open-websearch)
 [![smithery badge](https://smithery.ai/badge/@Aas-ee/open-websearch)](https://smithery.ai/server/@Aas-ee/open-websearch)
 ![Version](https://img.shields.io/github/v/release/Aas-ee/open-websearch)
 ![License](https://img.shields.io/github/license/Aas-ee/open-websearch)
@@ -238,16 +239,12 @@ npm run build
 {
   "mcpServers": {
     "web-search": {
-      "transport": {
-        "type": "streamableHttp",
-        "url": "http://localhost:3000/mcp"
-      }
+      "type": "http",
+      "url": "http://localhost:3000/mcp"
     },
     "web-search-sse": {
-      "transport": {
-        "type": "sse",
-        "url": "http://localhost:3000/sse"
-      }
+      "type": "sse",
+      "url": "http://localhost:3000/sse"
     }
   }
 }

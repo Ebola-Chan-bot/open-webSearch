@@ -15,6 +15,97 @@
 
 A Model Context Protocol (MCP) server based on multi-engine search results, supporting free web search without API keys.
 
+
+<details>
+  <summary><strong style="color: #95cfe4">Click to expand simple demo (deepseek-v3)</strong></summary>
+
+---
+
+### 🧩 Demo Start
+
+### prompt: 
+
+> Use the websearch tool to search "Open-WebSearch MCP", using the csdn engine, query 20 records, tell me the engine returned by the tool, along with related info, then use the URL to fetch articles by author Aasee (if there are multiple, query them sequentially, not simultaneously). Format the output properly.
+
+---
+
+### assistant: 
+
+I will use the MCP_search tool to query "Open-WebSearch MCP" using the CSDN engine to fetch 20 records.
+
+
+
+### Query Result Analysis
+
+1. **Search Engine Used**: CSDN
+2. **Total Records**: 20
+
+### Articles by Author Aasee
+The search results show 2 articles by author "Aasee.":
+
+1. **Article Title**: "开源 AI 联网搜索工具：Open-WebSearch MCP 全新升级，支持多引擎 + 流式响应！"
+   **URL**: https://blog.csdn.net/weixin_45801664/article/details/149000138
+   **Summary**: This project provides free, controllable web search capabilities for AI plugin development, supporting Bing, Baidu, CSDN multi-engine combined search...
+
+2. **Article Title**: "Web Seach 搜索 MCP 启动！"
+   **URL**: https://blog.csdn.net/weixin_45801664/article/details/148813614
+   **Summary**: Open-source Web Search MCP server Open-WebSearch launched, solving the problem of AI models unable to access latest web information...
+
+### Fetching First Article Content
+I will first fetch the full content of the first article:
+
+
+
+# Search Result Analysis
+
+## Engine Info Returned by Tool
+Used the CSDN search engine for the query, returning 20 related records.
+
+## Articles by Author Aasee
+
+### Article 1: "开源 AI 联网搜索工具：Open-WebSearch MCP 全新升级，支持多引擎 + 流式响应！"
+```
+🚀 Open-source AI Web Search Tool: Open-WebSearch MCP New Upgrade, Multi-engine + Streaming Response!
+
+💡 "Let your AI plugins truly access the web" — No API Key needed, controllable search results, ready to use!
+
+Project Highlights:
+✅ Multi-engine Real-time Search: Supports Bing, Baidu, CSDN, DuckDuckGo, Exa, Brave
+✅ Streaming Response (MCP Protocol): Compatible with Claude plugin (MCP) protocol
+✅ Article Content Extraction: Supports extracting full CSDN blog articles
+✅ Completely Free & No API Key Required
+✅ One-click Docker Deployment
+
+Installation:
+- Git clone: git clone https://github.com/Aas-ee/open-webSearch
+- Or use Docker: docker run -d --name web-search -p 3000:3000 -e ENABLE_CORS=true -e CORS_ORIGIN=* ghcr.io/aas-ee/open-web-search:latest
+
+MCP Tool Support:
+🔍 search: Multi-engine search tool
+📄 fetchCsdnArticle: Extract CSDN article full text
+🧪 fetchLinuxDoArticle: Fetch Linux.do articles (in development)
+
+Project Links:
+🧩 GitHub: https://github.com/Aas-ee/open-webSearch
+📦 Docker: ghcr.io/aas-ee/open-web-search:latest
+```
+
+### Article 2: "Web Seach 搜索 MCP 启动！"
+```
+Open-source Web Search MCP server Open-WebSearch launched, solving the problem of AI models
+unable to access latest web information.
+The project provides free Baidu search results API, supports structured JSON return format,
+compatible with Claude and other AI tools' MCP protocol.
+Users only need simple installation to use, no API keys required...
+```
+
+Would you like me to look up other articles by author Aasee? I can continue searching for you.
+
+### ✅ Demo End
+
+---
+</details>
+
 ## Features
 
 - Web search using multi-engine results
@@ -61,6 +152,7 @@ $env:DEFAULT_SEARCH_ENGINE="duckduckgo"; $env:ENABLE_CORS="true"; npx open-webse
 set MODE=stdio && set DEFAULT_SEARCH_ENGINE=duckduckgo && npx open-websearch@latest
 
 # Cross-platform (requires cross-env, Used for local development)
+# Global install
 npm install -g open-websearch
 npx cross-env DEFAULT_SEARCH_ENGINE=duckduckgo ENABLE_CORS=true open-websearch
 ```
@@ -91,6 +183,10 @@ USE_PROXY=true PROXY_URL=http://127.0.0.1:7890 npx open-websearch@latest
 # Full configuration
 DEFAULT_SEARCH_ENGINE=duckduckgo ENABLE_CORS=true USE_PROXY=true PROXY_URL=http://127.0.0.1:7890 PORT=8080 npx open-websearch@latest
 ```
+
+**Windows Users Note:**
+- In PowerShell, use `$env:VAR="value"; ` syntax
+- For local development, it's recommended to use `npx cross-env` for cross-platform compatibility
 
 ### Local Installation
 
@@ -145,16 +241,12 @@ npm run build
 {
   "mcpServers": {
     "web-search": {
-      "transport": {
-        "type": "streamableHttp",
-        "url": "http://localhost:3000/mcp"
-      }
+      "type": "http",
+      "url": "http://localhost:3000/mcp"
     },
     "web-search-sse": {
-      "transport": {
-        "type": "sse",
-        "url": "http://localhost:3000/sse"
-      }
+      "type": "sse",
+      "url": "http://localhost:3000/sse"
     }
   }
 }

@@ -1,4 +1,5 @@
 import { searchBing } from '../engines/bing/index.js';
+import { destroySharedBrowser } from '../engines/shared/browser.js';
 
 async function testBingSearch() {
   console.log('🔍 Starting Bing search test...');
@@ -28,4 +29,4 @@ async function testBingSearch() {
 }
 
 // Run the test
-testBingSearch().catch(console.error);
+testBingSearch().catch(console.error).finally(() => { destroySharedBrowser(); process.exit(0); });

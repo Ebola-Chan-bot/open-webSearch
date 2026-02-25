@@ -104,14 +104,14 @@ export async function searchJuejin(query: string, limit: number): Promise<Search
 
             // 检查是否有下一页
             if (!responseData.has_more || !responseData.cursor || results.length === 0) {
-                console.log('⚠️ No more results, ending search');
+                console.error('⚠️ No more results, ending search');
                 break;
             }
 
             cursor = responseData.cursor;
         }
 
-        console.log(`✅ Juejin search completed, found ${allResults.length} results`);
+        console.error(`✅ Juejin search completed, found ${allResults.length} results`);
         return allResults.slice(0, limit);
 
     } catch (error) {
