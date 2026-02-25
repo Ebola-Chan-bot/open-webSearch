@@ -109,7 +109,7 @@ MCP工具支持：
 - 使用多引擎搜索结果进行网络检索
     - bing
     - baidu
-    - ~~linux.do~~ 暂不支持
+    - linux.do
     - csdn
     - duckduckgo
     - exa

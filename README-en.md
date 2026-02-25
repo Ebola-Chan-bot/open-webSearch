@@ -111,7 +111,7 @@ Would you like me to look up other articles by author Aasee? I can continue sear
 - Web search using multi-engine results
     - bing
     - baidu
-    - ~~linux.do~~ temporarily unsupported
+    - linux.do
     - csdn
     - duckduckgo
     - exa
