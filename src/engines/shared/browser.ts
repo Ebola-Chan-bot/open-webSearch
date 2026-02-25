@@ -86,7 +86,6 @@ async function launchBrowser(): Promise<BrowserSession> {
     const port = await findFreePort();
 
     const args = [
-        '--headless=new',
         `--remote-debugging-port=${port}`,
         `--user-data-dir=${tempDir}`,
         '--no-sandbox',
@@ -97,6 +96,10 @@ async function launchBrowser(): Promise<BrowserSession> {
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-blink-features=AutomationControlled',
+        // 使用 GUI 模式（非 headless）以避免 Bing 等搜索引擎的反自动化检测，
+        // 通过将窗口移到屏幕外来隐藏
+        '--window-position=-32000,-32000',
+        '--window-size=1,1',
     ];
 
     console.error(`[browser] Spawning browser on port ${port}, profile: ${tempDir}`);
@@ -104,10 +107,13 @@ async function launchBrowser(): Promise<BrowserSession> {
     let browserPid: number | undefined;
 
     if (process.platform === 'win32') {
+        // 通过 WMI 启动浏览器，使用 Win32_ProcessStartup 的 ShowWindow=0 (SW_HIDE)
+        // 使窗口完全不可见，用户不会看到弹出的浏览器窗口
         const cmdLine = `"${browserPath}" ${args.join(' ')}`;
         const psScript = [
-            `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create`,
-            `-Arguments @{CommandLine='${cmdLine.replace(/'/g, "''")}'}`,
+            `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}`,
+            `; $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create`,
+            `-Arguments @{CommandLine='${cmdLine.replace(/'/g, "''")}'; ProcessStartupInformation=$si}`,
             `; if($r.ReturnValue -eq 0){$r.ProcessId}else{throw "WMI error: $($r.ReturnValue)"}`,
         ].join(' ');
         try {

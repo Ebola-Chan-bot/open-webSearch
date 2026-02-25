@@ -1,6 +1,7 @@
 import * as cheerio from 'cheerio';
 import { SearchResult } from '../../types.js';
 import { getSharedBrowser, destroySharedBrowser } from '../shared/browser.js';
+import type { Page } from 'puppeteer-core';
 
 /**
  * 解码 Bing 重定向 URL，提取实际目标地址。
@@ -25,81 +26,78 @@ function decodeBingUrl(bingUrl: string): string {
     }
 }
 
-let bingWarmedUp = false;
+function parsePageResults(html: string): SearchResult[] {
+    const $ = cheerio.load(html);
+    const results: SearchResult[] = [];
+    $('#b_results h2').each((i, element) => {
+        const linkElement = $(element).find('a').first();
+        if (linkElement.length) {
+            const rawUrl = linkElement.attr('href');
+            if (rawUrl && rawUrl.startsWith('http')) {
+                const url = decodeBingUrl(rawUrl);
+                const parentLi = $(element).closest('li');
+                const snippetElement = parentLi.find('p').first();
+                const sourceElement = parentLi.find('.b_tpcn');
+                results.push({
+                    title: linkElement.text().trim(),
+                    url: url,
+                    description: snippetElement.text().trim() || '',
+                    source: sourceElement.text().trim() || '',
+                    engine: 'bing'
+                });
+            }
+        }
+    });
+    return results;
+}
 
 /**
- * 预热请求：先访问 cn.bing.com 建立有效的搜索会话。
- * cn.bing.com 对多词中文查询需要有效的会话 cookie，
- * 否则会返回随机的无关内容。
+ * 通过 Bing 搜索框提交查询。
+ * Bing 会对直接 URL 导航返回降级的搜索结果（尤其对 "MCP" 等缩写词），
+ * 但通过搜索框表单提交（带 form=QBLH 参数）则能得到正确结果。
  */
-async function warmUpBingSession(): Promise<void> {
-    if (bingWarmedUp) return;
-    const browser = await getSharedBrowser();
-    const page = await browser.newPage();
-    try {
-        await page.goto('https://cn.bing.com/search?q=test', { waitUntil: 'networkidle2', timeout: 15000 });
-        await new Promise(r => setTimeout(r, 500));
-        bingWarmedUp = true;
-    } finally {
-        await page.close();
+async function submitSearchViaSearchBox(page: Page, query: string): Promise<void> {
+    await page.goto('https://www.bing.com', { waitUntil: 'networkidle2', timeout: 15000 });
+    await new Promise(r => setTimeout(r, 500));
+    // 清空搜索框（可能有残留内容）并输入查询
+    const searchBox = await page.$('#sb_form_q');
+    if (searchBox) {
+        await searchBox.click({ clickCount: 3 }); // 选中全部
+        await page.keyboard.press('Backspace');    // 删除
     }
+    await page.type('#sb_form_q', query, { delay: 5 });
+    await page.keyboard.press('Enter');
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+    await new Promise(r => setTimeout(r, 500));
 }
 
 export async function searchBing(query: string, limit: number): Promise<SearchResult[]> {
     try {
-        await warmUpBingSession();
         const browser = await getSharedBrowser();
+        const page = await browser.newPage();
 
-        let allResults: SearchResult[] = [];
-        let pn = 0;
+        try {
+            // 第一页：通过搜索框提交
+            await submitSearchViaSearchBox(page, query);
+            let allResults = parsePageResults(await page.content());
 
-        while (allResults.length < limit) {
-            const page = await browser.newPage();
-
-            const searchUrl = `https://cn.bing.com/search?q=${encodeURIComponent(query)}&first=${1 + pn * 10}`;
-            await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 15000 });
-            await new Promise(r => setTimeout(r, 1000));
-
-            const html = await page.content();
-            await page.close();
-
-            const $ = cheerio.load(html);
-            const results: SearchResult[] = [];
-
-            $('#b_results h2').each((i, element) => {
-                const linkElement = $(element).find('a').first();
-                if (linkElement.length) {
-                    const rawUrl = linkElement.attr('href');
-                    if (rawUrl && rawUrl.startsWith('http')) {
-                        const url = decodeBingUrl(rawUrl);
-                        const parentLi = $(element).closest('li');
-                        const snippetElement = parentLi.find('p').first();
-                        const sourceElement = parentLi.find('.b_tpcn');
-
-                        results.push({
-                            title: linkElement.text().trim(),
-                            url: url,
-                            description: snippetElement.text().trim() || '',
-                            source: sourceElement.text().trim() || '',
-                            engine: 'bing'
-                        });
-                    }
-                }
-            });
-
-            allResults = allResults.concat(results);
-
-            if (results.length === 0) {
-                console.error('⚠️ No more results, ending early....');
-                break;
+            // 后续页：在已有 session 中直接翻页
+            while (allResults.length < limit) {
+                const nextLink = await page.$('.sb_pagN');
+                if (!nextLink) break;
+                await nextLink.click();
+                await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+                await new Promise(r => setTimeout(r, 500));
+                const pageResults = parsePageResults(await page.content());
+                if (pageResults.length === 0) break;
+                allResults = allResults.concat(pageResults);
             }
 
-            pn += 1;
+            return allResults.slice(0, limit);
+        } finally {
+            await page.close();
         }
-
-        return allResults.slice(0, limit);
     } catch (err) {
-        bingWarmedUp = false;
         destroySharedBrowser();
         throw err;
     }
