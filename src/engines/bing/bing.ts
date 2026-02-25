@@ -1,54 +1,297 @@
-import axios from 'axios';
+import puppeteer, { type Browser } from 'puppeteer-core';
 import * as cheerio from 'cheerio';
+import { existsSync, mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { spawn, execFileSync } from 'child_process';
+import { createServer } from 'net';
 import { SearchResult } from '../../types.js';
 
-export async function searchBing(query: string, limit: number): Promise<SearchResult[]> {
-    let allResults: SearchResult[] = [];
-    let pn = 0;
+/**
+ * 解码 Bing 重定向 URL，提取实际目标地址。
+ * Bing URL 格式: https://www.bing.com/ck/a?...&u=a1<Base64编码的URL>
+ * 参数 'u' 的值以 'a1' 开头，后接 Base64 编码的原始 URL。
+ */
+function decodeBingUrl(bingUrl: string): string {
+    try {
+        const url = new URL(bingUrl);
+        const encodedUrl = url.searchParams.get('u');
+        if (!encodedUrl) {
+            return bingUrl;
+        }
+        const base64Part = encodedUrl.substring(2);
+        const decodedUrl = Buffer.from(base64Part, 'base64').toString('utf-8');
+        if (decodedUrl.startsWith('http')) {
+            return decodedUrl;
+        }
+        return bingUrl;
+    } catch {
+        return bingUrl;
+    }
+}
 
-    while (allResults.length < limit) {
-        const response = await axios.get('https://www.bing.com/search', {
-            params: {
-                q: query,
-                first: 1 + pn * 10
-            },
-            headers: {
-                "authority": "www.bing.com",
-                "ect": "3g",
-                "pragma": "no-cache",
-                "sec-ch-ua-arch": "\"x86\"",
-                "sec-ch-ua-bitness": "\"64\"",
-                "sec-ch-ua-full-version": "\"112.0.5615.50\"",
-                "sec-ch-ua-full-version-list": "\"Chromium\";v=\"112.0.5615.50\", \"Google Chrome\";v=\"112.0.5615.50\", \"Not:A-Brand\";v=\"99.0.0.0\"",
-                "sec-ch-ua-model": "\"\"",
-                "sec-ch-ua-platform-version": "\"15.0.0\"",
-                "sec-fetch-user": "?1",
-                "upgrade-insecure-requests": "1",
-                "Cookie": "MUID=3727DBB14FD763511D80CDBD4ED262EF; MSPTC=5UlNf4UsLqV53oFqqdHiR26FwDDL8zSW3kC74kIJQfM; _EDGE_S=SID=132F08F578E06F832D931EE779E16E2D; MUIDB=3727DBB14FD763511D80CDBD4ED262EF; SRCHD=AF=NOFORM; SRCHUID=V=2&GUID=B3AFD0E41DB649E39803C690946C3B65&dmnchg=1; ak_bmsc=578AE2B7DA55FA9F332ADCDFBA0B9B64~000000000000000000000000000000~YAAQZCg0F9XLkYGXAQAAjywwkhxcD6Pm2nguBmpB14hnmCR3kz9Mfau5cZ7pwHxdU2Uog9+6hOkBmzpOV3UoTOhi52nB725xM7zN90mRDv0zQtJdO/llaKlt2zqTmB4F5kd+GzPjXLAN4Zmj4KwpAjLK1T4TexH/9WlQTkRamdJTKuR47IZWHHebqsbNqHoYncHhxICO9Rnu51vhlps/rrhPBtgPgbrQnDfr6YzAQWmSqc5g9hk03sM9nnWUyVbRV0ZVsgke7BCYX5V1JD5L0Zf8/FWdntBpjpd2IcmehBz38ChGThPrBEWNCZQbCS6lE4OaQanrrdmBHf/r5YEf2LeIqZy0bJGIiSQaSh6d7KFO2haTQk/JscZAs+V5kNsAOxIGreRve+E=; _UR=QS=0&TQS=0&Pn=0; BFBUSR=BFBHP=0; SRCHUSR=DOB=20250621&DS=1; _Rwho=u=d&ts=2025-06-21; ipv6=hit=1750507922628&t=4; BFPRResults=FirstPageUrls=C5E678E900F98310F0D3DB1F3EB96D99%2CB5A20FAE72B0C3019A56409EAC7AF3FB%2C7A44A77FF42EDF11CC9BF5CFE08B179A%2C6ED615E5E634BD5AFC7BB2A0A77F8FF8%2CA993E7AAF4890BEC06882621CA376D00%2C49CF0FC3C203D5E918A76258506B0CF4%2C7F03D5026C1D046F66B11D525095BF8B%2C058BB67A6B7F15E58D3A19B897BC57F8%2C1B886024FDE703428D24A41AFA1E62AF%2C5A8B56DC0AE03A8B94643DEA2A22DBAC&FPIG=05F126AA95514CF5AD5E33E4AEBA474D; _HPVN=CS=eyJQbiI6eyJDbiI6MSwiU3QiOjAsIlFzIjowLCJQcm9kIjoiUCJ9LCJTYyI6eyJDbiI6MSwiU3QiOjAsIlFzIjowLCJQcm9kIjoiSCJ9LCJReiI6eyJDbiI6MSwiU3QiOjAsIlFzIjowLCJQcm9kIjoiVCJ9LCJBcCI6dHJ1ZSwiTXV0ZSI6dHJ1ZSwiTGFkIjoiMjAyNS0wNi0yMVQwMDowMDowMFoiLCJJb3RkIjowLCJHd2IiOjAsIlRucyI6MCwiRGZ0IjpudWxsLCJNdnMiOjAsIkZsdCI6MCwiSW1wIjoxNSwiVG9ibiI6MH0=; _C_ETH=1; _RwBf=r=0&ilt=15&ihpd=1&ispd=14&rc=36&rb=0&rg=200&pc=36&mtu=0&rbb=0&clo=0&v=15&l=2025-06-21T07:00:00.0000000Z&lft=0001-01-01T00:00:00.0000000&aof=0&ard=0001-01-01T00:00:00.0000000&rwdbt=0&rwflt=0&rwaul2=0&g=&o=2&p=&c=&t=0&s=0001-01-01T00:00:00.0000000+00:00&ts=2025-06-21T11:36:08.7064260+00:00&rwred=0&wls=&wlb=&wle=&ccp=&cpt=&lka=0&lkt=0&aad=0&TH=&cid=0&gb=; _SS=SID=132F08F578E06F832D931EE779E16E2D&R=36&RB=0&GB=0&RG=200&RP=36; SRCHHPGUSR=SRCHLANG=zh-Hans&IG=63A0A44F5D2F4499AD165A366D073C03&DM=0&BRW=N&BRH=T&CW=1202&CH=1289&SCW=1185&SCH=2279&DPR=1.0&UTC=480&HV=1750505768&HVE=notFound&WTS=63886101120&PV=15.0.0&PRVCW=1202&PRVCH=1289&EXLTT=13; SRCHHPGUSR=SRCHLANG=en&IG=9A53F826E9C9432497327CA995144E14&DM=0&BRW=N&BRH=T&CW=1202&CH=1289&SCW=1185&SCH=2279&DPR=1.0&UTC=480&HV=1750505768&HVE=notFound&WTS=63886101120&PV=15.0.0&PRVCW=1202&PRVCH=1289&EXLTT=13",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
-                "Accept": "*/*",
-                "Host": "cn.bing.com",
-                "Connection": "keep-alive"
+let cachedBrowserPath: string | null = null;
+
+function getBrowserPath(): string {
+    if (cachedBrowserPath) return cachedBrowserPath;
+
+    const candidates: string[] = [];
+
+    // Windows 硬编码常见路径（MCP 环境下环境变量可能缺失时的后备方案）
+    candidates.push('C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe');
+    candidates.push('C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe');
+    candidates.push('C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe');
+    candidates.push('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+
+    // 基于环境变量的路径
+    const pf86 = process.env['PROGRAMFILES(X86)'];
+    const pf = process.env['PROGRAMFILES'];
+    const localAppData = process.env['LOCALAPPDATA'];
+    if (pf86) {
+        candidates.push(pf86 + '\\Microsoft\\Edge\\Application\\msedge.exe');
+        candidates.push(pf86 + '\\Google\\Chrome\\Application\\chrome.exe');
+    }
+    if (pf) {
+        candidates.push(pf + '\\Microsoft\\Edge\\Application\\msedge.exe');
+        candidates.push(pf + '\\Google\\Chrome\\Application\\chrome.exe');
+    }
+    if (localAppData) {
+        candidates.push(localAppData + '\\Google\\Chrome\\Application\\chrome.exe');
+    }
+
+    // Linux/macOS 路径
+    candidates.push('/usr/bin/google-chrome', '/usr/bin/chromium-browser', '/usr/bin/chromium', '/usr/bin/microsoft-edge');
+    candidates.push('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
+    candidates.push('/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge');
+
+    // 去重
+    const unique = [...new Set(candidates)];
+    for (const p of unique) {
+        if (existsSync(p)) {
+            console.error(`[bing] Found browser: ${p}`);
+            cachedBrowserPath = p;
+            return p;
+        }
+    }
+    throw new Error('未找到 Chromium 内核浏览器，请安装 Chrome 或 Edge。');
+}
+
+/** 查找可用的 TCP 端口 */
+function findFreePort(): Promise<number> {
+    return new Promise((resolve, reject) => {
+        const srv = createServer();
+        srv.listen(0, '127.0.0.1', () => {
+            const addr = srv.address();
+            if (addr && typeof addr === 'object') {
+                const port = addr.port;
+                srv.close(() => resolve(port));
+            } else {
+                srv.close(() => reject(new Error('Could not determine port')));
             }
         });
+        srv.on('error', reject);
+    });
+}
 
-        const $ = cheerio.load(response.data);
-        const results: SearchResult[] = [];
+/** 缓存的浏览器会话，跨搜索复用 */
+let cachedSession: { browser: Browser; tempDir: string; browserPid?: number; warmedUp: boolean } | null = null;
 
-        $('#b_content').children()
-            .find('#b_results').children()
-            .each((i, element) => {
-                const titleElement = $(element).find('h2');
-                const linkElement = $(element).find('a');
-                const snippetElement = $(element).find('p').first();
+async function launchBrowser(): Promise<{ browser: Browser; tempDir: string; browserPid?: number }> {
+    const browserPath = getBrowserPath();
+    const tempDir = mkdtempSync(join(tmpdir(), 'bing-search-'));
+    const port = await findFreePort();
 
-                if (titleElement.length && linkElement.length) {
-                    const url = linkElement.attr('href');
-                    if (url && url.startsWith('http')) {
+    const args = [
+        '--headless=new',
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${tempDir}`,
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-gpu',
+        '--disable-dev-shm-usage',
+        '--disable-extensions',
+        '--no-first-run',
+        '--no-default-browser-check',
+    ];
 
-                        const sourceElement = $(element).find('.b_tpcn');
+    console.error(`[bing] Spawning browser on port ${port}, profile: ${tempDir}`);
+
+    let browserPid: number | undefined;
+
+    if (process.platform === 'win32') {
+        // Windows: 通过 WMI (Win32_Process.Create) 创建浏览器进程。
+        // VS Code 的 MCP 服务器环境使用 Job Object 管控子进程，
+        // 导致 spawn/exec 创建的浏览器被立即终止（退出码 0）。
+        // WMI 创建的进程完全独立于父进程的 Job Object，不受此限制。
+        const cmdLine = `"${browserPath}" ${args.join(' ')}`;
+        const psScript = [
+            `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create`,
+            `-Arguments @{CommandLine='${cmdLine.replace(/'/g, "''")}'}`,
+            `; if($r.ReturnValue -eq 0){$r.ProcessId}else{throw "WMI error: $($r.ReturnValue)"}`,
+        ].join(' ');
+        try {
+            const output = execFileSync('powershell.exe', [
+                '-NoProfile', '-NonInteractive', '-Command', psScript,
+            ], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+            browserPid = parseInt(output.trim());
+            console.error(`[bing] Browser started via WMI, PID: ${browserPid}`);
+        } catch (err: any) {
+            try { rmSync(tempDir, { recursive: true, force: true }); } catch {}
+            throw new Error(`通过 WMI 启动浏览器失败: ${err.message}`);
+        }
+    } else {
+        // Linux/macOS: 直接启动浏览器
+        const child = spawn(browserPath, args, {
+            stdio: 'ignore',
+            detached: true,
+        });
+        // [Copilot review #6] 监听 error 事件，避免 spawn 失败（如 ENOENT）时
+        // 未处理的 error 事件导致进程崩溃
+        child.on('error', () => {});
+        child.unref();
+        browserPid = child.pid;
+    }
+
+    // [Copilot review #2] Copilot 建议用 --remote-debugging-port=0 + stderr 解析取代端口轮询，
+    // 但当前架构（Windows WMI / Linux detached spawn）均无法获取 stderr，只能轮询。
+    const debugUrl = `http://127.0.0.1:${port}/json/version`;
+    let wsUrl: string | null = null;
+    for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 200));
+        // [Copilot review #3] 为每次 fetch 添加超时，避免端口被劫持或连接卡住时
+        // 单次请求无限挂起，使 30 次重试上限失效。
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2000);
+        try {
+            const resp = await fetch(debugUrl, { signal: controller.signal });
+            const data = await resp.json() as { webSocketDebuggerUrl?: string };
+            if (data.webSocketDebuggerUrl) {
+                wsUrl = data.webSocketDebuggerUrl;
+                break;
+            }
+        } catch {
+            // 浏览器尚未就绪或请求超时
+        } finally {
+            clearTimeout(timeoutId);
+        }
+    }
+
+    if (!wsUrl) {
+        if (browserPid) try { process.kill(browserPid); } catch {}
+        try { rmSync(tempDir, { recursive: true, force: true }); } catch {}
+        throw new Error('浏览器启动失败：无法获取 WebSocket URL');
+    }
+
+    console.error(`[bing] Browser ready, connecting via ${wsUrl}`);
+    // [Copilot review #7] puppeteer.connect 失败时清理子进程和临时目录，
+    // 避免 launchBrowser 抛出后调用方无法清理的资源泄漏
+    try {
+        const browser = await puppeteer.connect({ browserWSEndpoint: wsUrl });
+        return { browser, tempDir, browserPid };
+    } catch (err) {
+        if (browserPid) try { process.kill(browserPid); } catch {}
+        try { rmSync(tempDir, { recursive: true, force: true }); } catch {}
+        throw err;
+    }
+}
+
+/** 获取或复用浏览器会话 */
+async function getBrowser(): Promise<{ browser: Browser; tempDir: string; browserPid?: number }> {
+    // 检查已缓存的浏览器是否仍然可用
+    if (cachedSession) {
+        try {
+            // 尝试获取版本信息来验证连接是否正常
+            await cachedSession.browser.version();
+            return cachedSession;
+        } catch {
+            console.error('[bing] Cached browser session is dead, relaunching...');
+            cleanupSession(cachedSession);
+            cachedSession = null;
+        }
+    }
+
+    const session = await launchBrowser();
+    cachedSession = { ...session, warmedUp: false };
+
+    // 进程退出时清理浏览器
+    const cleanup = () => {
+        if (cachedSession) {
+            cleanupSession(cachedSession);
+            cachedSession = null;
+        }
+    };
+    process.once('exit', cleanup);
+    process.once('SIGINT', cleanup);
+    process.once('SIGTERM', cleanup);
+
+    return cachedSession;
+}
+
+function cleanupSession(session: { browser: Browser; tempDir: string; browserPid?: number }) {
+    try { session.browser.close(); } catch {}
+    if (session.browserPid) try { process.kill(session.browserPid); } catch {}
+    try { rmSync(session.tempDir, { recursive: true, force: true }); } catch {}
+}
+
+/**
+ * 预热请求：先访问 cn.bing.com 建立有效的搜索会话。
+ * cn.bing.com 对多词中文查询需要有效的会话 cookie，
+ * 否则会返回随机的无关内容。
+ */
+async function warmUpSession(browser: Browser): Promise<void> {
+    const page = await browser.newPage();
+    try {
+        await page.goto('https://cn.bing.com/search?q=test', { waitUntil: 'networkidle2', timeout: 15000 });
+        await new Promise(r => setTimeout(r, 500));
+    } finally {
+        await page.close();
+    }
+}
+
+export async function searchBing(query: string, limit: number): Promise<SearchResult[]> {
+    const { browser } = await getBrowser();
+
+    try {
+        // 首次使用时预热会话，从 cn.bing.com 获取有效 cookie
+        if (cachedSession && !cachedSession.warmedUp) {
+            await warmUpSession(browser);
+            cachedSession.warmedUp = true;
+        }
+
+        let allResults: SearchResult[] = [];
+        let pn = 0;
+
+        // [Copilot review #1] Copilot 建议为每个 page 添加 try/finally，
+        // 但异常会直接传播到外层 finally 的 browser.close()，所有页面随之销毁，无需单独处理。
+        // [Copilot review #4] Copilot 建议按环境变量条件化 --no-sandbox，
+        // 但 --no-sandbox 是 headless 自动化的标准做法，且 Docker 容器内通常需要，条件化会增加复杂度。
+        // [Copilot review #5] Copilot 建议 kill() 添加 try/catch，
+        // 当前代码已使用 try { process.kill(browserPid); } catch {} 容错处理。
+        while (allResults.length < limit) {
+            const page = await browser.newPage();
+
+            const searchUrl = `https://cn.bing.com/search?q=${encodeURIComponent(query)}&first=${1 + pn * 10}`;
+            await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+            await new Promise(r => setTimeout(r, 1000));
+
+            const html = await page.content();
+            await page.close();
+
+            const $ = cheerio.load(html);
+            const results: SearchResult[] = [];
+
+            $('#b_results h2').each((i, element) => {
+                const linkElement = $(element).find('a').first();
+                if (linkElement.length) {
+                    const rawUrl = linkElement.attr('href');
+                    if (rawUrl && rawUrl.startsWith('http')) {
+                        const url = decodeBingUrl(rawUrl);
+                        const parentLi = $(element).closest('li');
+                        const snippetElement = parentLi.find('p').first();
+                        const sourceElement = parentLi.find('.b_tpcn');
+
                         results.push({
-                            title: titleElement.text(),
+                            title: linkElement.text().trim(),
                             url: url,
                             description: snippetElement.text().trim() || '',
                             source: sourceElement.text().trim() || '',
@@ -58,15 +301,23 @@ export async function searchBing(query: string, limit: number): Promise<SearchRe
                 }
             });
 
-        allResults = allResults.concat(results);
+            allResults = allResults.concat(results);
 
-        if (results.length === 0) {
-            console.error('⚠️ No more results, ending early....');
-            break;
+            if (results.length === 0) {
+                console.error('⚠️ No more results, ending early....');
+                break;
+            }
+
+            pn += 1;
         }
 
-        pn += 1;
+        return allResults.slice(0, limit);
+    } catch (err) {
+        // 搜索出错时销毁缓存的浏览器会话，下次重新启动
+        if (cachedSession) {
+            cleanupSession(cachedSession);
+            cachedSession = null;
+        }
+        throw err;
     }
-
-    return allResults.slice(0, limit); // 截取最多 limit 个
 }
