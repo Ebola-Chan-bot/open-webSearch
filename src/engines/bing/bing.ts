@@ -1,7 +1,6 @@
 import * as cheerio from 'cheerio';
 import { SearchResult } from '../../types.js';
 import { getSharedBrowser, destroySharedBrowser } from '../shared/browser.js';
-import type { Page } from 'puppeteer-core';
 
 /**
  * 解码 Bing 重定向 URL，提取实际目标地址。
@@ -51,37 +50,17 @@ function parsePageResults(html: string): SearchResult[] {
     return results;
 }
 
-/**
- * 通过 Bing 搜索框提交查询。
- * Bing 会对直接 URL 导航返回降级的搜索结果（尤其对 "MCP" 等缩写词），
- * 但通过搜索框表单提交（带 form=QBLH 参数）则能得到正确结果。
- */
-async function submitSearchViaSearchBox(page: Page, query: string): Promise<void> {
-    await page.goto('https://www.bing.com', { waitUntil: 'networkidle2', timeout: 15000 });
-    await new Promise(r => setTimeout(r, 500));
-    // 清空搜索框（可能有残留内容）并输入查询
-    const searchBox = await page.$('#sb_form_q');
-    if (searchBox) {
-        await searchBox.click({ clickCount: 3 }); // 选中全部
-        await page.keyboard.press('Backspace');    // 删除
-    }
-    await page.type('#sb_form_q', query, { delay: 5 });
-    await page.keyboard.press('Enter');
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
-    await new Promise(r => setTimeout(r, 500));
-}
-
 export async function searchBing(query: string, limit: number): Promise<SearchResult[]> {
     try {
         const browser = await getSharedBrowser();
         const page = await browser.newPage();
 
         try {
-            // 第一页：通过搜索框提交
-            await submitSearchViaSearchBox(page, query);
+            const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+            await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+            await new Promise(r => setTimeout(r, 500));
             let allResults = parsePageResults(await page.content());
 
-            // 后续页：在已有 session 中直接翻页
             while (allResults.length < limit) {
                 const nextLink = await page.$('.sb_pagN');
                 if (!nextLink) break;
