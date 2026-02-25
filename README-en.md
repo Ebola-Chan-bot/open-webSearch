@@ -125,6 +125,8 @@ Would you like me to look up other articles by author Aasee? I can continue sear
 - Support for fetching individual article content
     - csdn
     - github (README files)
+    - juejin
+    - linux.do
 
 ## TODO
 - Support for ~~Bing~~ (already supported), ~~DuckDuckGo~~ (already supported), ~~Exa~~ (already supported), ~~Brave~~ (already supported), Google and other search engines
@@ -163,12 +165,13 @@ npx cross-env DEFAULT_SEARCH_ENGINE=duckduckgo ENABLE_CORS=true open-websearch
 |----------|-------------------------|---------|-------------|
 | `ENABLE_CORS` | `false`                 | `true`, `false` | Enable CORS |
 | `CORS_ORIGIN` | `*`                     | Any valid origin | CORS origin configuration |
-| `DEFAULT_SEARCH_ENGINE` | `bing`                  | `bing`, `duckduckgo`, `exa`, `brave`, `baidu`, `csdn`, `juejin` | Default search engine |
+| `DEFAULT_SEARCH_ENGINE` | `bing`                  | `bing`, `duckduckgo`, `exa`, `brave`, `baidu`, `csdn`, `juejin`, `linuxdo` | Default search engine |
 | `USE_PROXY` | `false`                 | `true`, `false` | Enable HTTP proxy |
-| `PROXY_URL` | `http://127.0.0.1:7890` | Any valid URL | Proxy server URL |
+| `PROXY_URL` | `http://127.0.0.1:10809` | Any valid URL | Proxy server URL |
 | `MODE` | `both`                  | `both`, `http`, `stdio` | Server mode: both HTTP+STDIO, HTTP only, or STDIO only |
 | `PORT` | `3000`                  | 1-65535 | Server port |
 | `ALLOWED_SEARCH_ENGINES` | empty (all available) | Comma-separated engine names | Limit which search engines can be used; if the default engine is not in this list, the first allowed engine becomes the default |
+| `MAX_DESCRIPTION_LENGTH` | unlimited | Positive integer | Global max length for search result descriptions, excess will be truncated |
 | `MCP_TOOL_SEARCH_NAME` | `search` | Valid MCP tool name | Custom name for the search tool |
 | `MCP_TOOL_FETCH_LINUXDO_NAME` | `fetchLinuxDoArticle` | Valid MCP tool name | Custom name for the Linux.do article fetch tool |
 | `MCP_TOOL_FETCH_CSDN_NAME` | `fetchCsdnArticle` | Valid MCP tool name | Custom name for the CSDN article fetch tool |
@@ -307,10 +310,13 @@ Environment variable configuration:
 |----------|-------------------------|---------|-------------|
 | `ENABLE_CORS` | `false`                 | `true`, `false` | Enable CORS |
 | `CORS_ORIGIN` | `*`                     | Any valid origin | CORS origin configuration |
-| `DEFAULT_SEARCH_ENGINE` | `bing`                  | `bing`, `duckduckgo`, `exa`, `brave` | Default search engine |
+| `DEFAULT_SEARCH_ENGINE` | `bing`                  | `bing`, `duckduckgo`, `exa`, `brave`, `baidu`, `csdn`, `juejin`, `linuxdo` | Default search engine |
 | `USE_PROXY` | `false`                 | `true`, `false` | Enable HTTP proxy |
-| `PROXY_URL` | `http://127.0.0.1:7890` | Any valid URL | Proxy server URL |
+| `PROXY_URL` | `http://127.0.0.1:10809` | Any valid URL | Proxy server URL |
+| `MODE` | `both`                  | `both`, `http`, `stdio` | Server mode |
 | `PORT` | `3000`                  | 1-65535 | Server port |
+| `ALLOWED_SEARCH_ENGINES` | empty (all available) | Comma-separated engine names | Limit which search engines can be used |
+| `MAX_DESCRIPTION_LENGTH` | unlimited | Positive integer | Global max length for search result descriptions |
 
 Then configure in your MCP client:
 ```json
@@ -338,15 +344,16 @@ Then configure in your MCP client:
 
 ## Usage Guide
 
-The server provides four tools: `search`, `fetchLinuxDoArticle`, `fetchCsdnArticle`, and `fetchGithubReadme`.
+The server provides five tools: `search`, `fetchCsdnArticle`, `fetchGithubReadme`, `fetchJuejinArticle`, and `fetchLinuxDoArticle`.
 
 ### search Tool Usage
 
 ```typescript
 {
   "query": string,        // Search query
-  "limit": number,        // Optional: Number of results to return (default: 10)
-  "engines": string[]     // Optional: Engines to use (bing,baidu,linuxdo,csdn,duckduckgo,exa,brave,juejin) default bing
+  "limit": number,        // Optional: Number of results to return (default: 10, range: 1-50)
+  "engines": string[],    // Optional: Engines to use (bing,baidu,linuxdo,csdn,duckduckgo,exa,brave,juejin) default bing, case-insensitive
+  "maxDescriptionLength": number  // Optional: Max description length per call, overrides global MAX_DESCRIPTION_LENGTH
 }
 ```
 

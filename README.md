@@ -123,6 +123,8 @@ MCP工具支持：
 - 支持获取单篇文章内容
     - csdn
     - github（README文件）
+    - 掘金（juejin）
+    - linux.do
 
 ## TODO
 - 支持~~Bing~~（已支持）,~~DuckDuckGo~~（已支持）,~~Exa~~（已支持）,~~Brave~~（已支持）,Google等搜索引擎
@@ -161,12 +163,13 @@ npx cross-env DEFAULT_SEARCH_ENGINE=duckduckgo ENABLE_CORS=true open-websearch
 |--------|-------------------------|--------|--------------------------------------|
 | `ENABLE_CORS` | `false`                 | `true`, `false` | 启用CORS                               |
 | `CORS_ORIGIN` | `*`                     | 任何有效来源 | CORS来源配置                             |
-| `DEFAULT_SEARCH_ENGINE` | `bing`                  | `bing`, `duckduckgo`, `exa`, `brave`, `baidu`, `csdn`, `juejin` | 默认搜索引擎                               |
+| `DEFAULT_SEARCH_ENGINE` | `bing`                  | `bing`, `duckduckgo`, `exa`, `brave`, `baidu`, `csdn`, `juejin`, `linuxdo` | 默认搜索引擎                               |
 | `USE_PROXY` | `false`                 | `true`, `false` | 启用HTTP代理                             |
-| `PROXY_URL` | `http://127.0.0.1:7890` | 任何有效URL | 代理服务器URL                             |
+| `PROXY_URL` | `http://127.0.0.1:10809` | 任何有效URL | 代理服务器URL                             |
 | `MODE` | `both`                  | `both`, `http`, `stdio` | 服务器模式：同时支持HTTP+STDIO、仅HTTP或仅STDIO    |
 | `PORT` | `3000`                  | 1-65535 | 服务器端口                                |
 | `ALLOWED_SEARCH_ENGINES` | 空（全部可用） | 逗号分隔的引擎名称 | 限制可使用的搜索引擎，如默认搜索引擎不在范围，则默认第一个为默认搜索引擎 |
+| `MAX_DESCRIPTION_LENGTH` | 无限制 | 正整数 | 搜索结果描述的全局最大长度，超出部分将被截断 |
 | `MCP_TOOL_SEARCH_NAME` | `search` | 有效的MCP工具名称 | 搜索工具的自定义名称 |
 | `MCP_TOOL_FETCH_LINUXDO_NAME` | `fetchLinuxDoArticle` | 有效的MCP工具名称 | Linux.do文章获取工具的自定义名称 |
 | `MCP_TOOL_FETCH_CSDN_NAME` | `fetchCsdnArticle` | 有效的MCP工具名称 | CSDN文章获取工具的自定义名称 |
@@ -305,10 +308,13 @@ docker run -d --name web-search -p 3000:3000 -e ENABLE_CORS=true -e CORS_ORIGIN=
 |--------|-------------------------|--------|------|
 | `ENABLE_CORS` | `false`                 | `true`, `false` | 启用CORS |
 | `CORS_ORIGIN` | `*`                     | 任何有效来源 | CORS来源配置 |
-| `DEFAULT_SEARCH_ENGINE` | `bing`                  | `bing`, `duckduckgo`, `exa`, `brave` | 默认搜索引擎 |
+| `DEFAULT_SEARCH_ENGINE` | `bing`                  | `bing`, `duckduckgo`, `exa`, `brave`, `baidu`, `csdn`, `juejin`, `linuxdo` | 默认搜索引擎 |
 | `USE_PROXY` | `false`                 | `true`, `false` | 启用HTTP代理 |
-| `PROXY_URL` | `http://127.0.0.1:7890` | 任何有效URL | 代理服务器URL |
+| `PROXY_URL` | `http://127.0.0.1:10809` | 任何有效URL | 代理服务器URL |
+| `MODE` | `both`                  | `both`, `http`, `stdio` | 服务器模式 |
 | `PORT` | `3000`                  | 1-65535 | 服务器端口 |
+| `ALLOWED_SEARCH_ENGINES` | 空（全部可用） | 逗号分隔的引擎名称 | 限制可使用的搜索引擎 |
+| `MAX_DESCRIPTION_LENGTH` | 无限制 | 正整数 | 搜索结果描述最大长度 |
 
 然后在MCP客户端中配置：
 ```json
@@ -336,15 +342,16 @@ docker run -d --name web-search -p 3000:3000 -e ENABLE_CORS=true -e CORS_ORIGIN=
 
 ## 使用说明
 
-服务器提供四个工具：`search`、`fetchLinuxDoArticle`、`fetchCsdnArticle` 和 `fetchGithubReadme`。
+服务器提供五个工具：`search`、`fetchCsdnArticle`、`fetchGithubReadme`、`fetchJuejinArticle` 和 `fetchLinuxDoArticle`。
 
 ### search工具使用说明
 
 ```typescript
 {
   "query": string,        // 搜索查询词
-  "limit": number,        // 可选：返回结果数量（默认：10）
-  "engines": string[]     // 可选：使用的引擎 (bing,baidu,linuxdo,csdn,duckduckgo,exa,brave,juejin) 默认bing
+  "limit": number,        // 可选：返回结果数量（默认：10，范围：1-50）
+  "engines": string[],    // 可选：使用的引擎 (bing,baidu,linuxdo,csdn,duckduckgo,exa,brave,juejin) 默认bing，大小写不敏感
+  "maxDescriptionLength": number  // 可选：单次调用的描述最大长度，优先级高于全局 MAX_DESCRIPTION_LENGTH
 }
 ```
 
