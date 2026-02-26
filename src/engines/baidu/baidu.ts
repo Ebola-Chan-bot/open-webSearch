@@ -13,7 +13,17 @@ export async function searchBaidu(query: string, limit: number): Promise<SearchR
 
             const searchUrl = `https://www.baidu.com/s?wd=${encodeURIComponent(query)}&pn=${pn}&ie=utf-8`;
 
-            await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+            try {
+                await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+            } catch (navErr: any) {
+                // 百度可能在导航时销毁 iframe（如天气小组件），回退到 domcontentloaded
+                if (navErr.message?.includes('frame was detached') || navErr.message?.includes('Navigating frame')) {
+                    console.error('⚠️ Baidu frame detached during navigation, retrying with domcontentloaded...');
+                    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                } else {
+                    throw navErr;
+                }
+            }
             await new Promise(r => setTimeout(r, 1000));
 
             const html = await page.content();

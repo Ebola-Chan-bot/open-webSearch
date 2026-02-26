@@ -38,7 +38,7 @@ export async function searchCsdn(query: string, limit: number): Promise<SearchRe
             results.push ({
                 title: title,
                 url: url_location,
-                description: digest,
+                description: digest || '',
                 source: nickname,
                 engine: "csdn"
             });

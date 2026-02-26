@@ -64,9 +64,11 @@ export async function searchBing(query: string, limit: number): Promise<SearchRe
             while (allResults.length < limit) {
                 const nextLink = await page.$('.sb_pagN');
                 if (!nextLink) break;
+                // Bing 翻页可能用完整导航或 AJAX，两种方式都要兼容
+                const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
                 await nextLink.click();
-                await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
-                await new Promise(r => setTimeout(r, 500));
+                await navPromise;
+                await new Promise(r => setTimeout(r, 1000));
                 const pageResults = parsePageResults(await page.content());
                 if (pageResults.length === 0) break;
                 allResults = allResults.concat(pageResults);
