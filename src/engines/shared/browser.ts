@@ -259,9 +259,41 @@ public class HiddenLauncher {
     }
 }
 
-function cleanupSession(session: BrowserSession) {
+/**
+ * 优雅关闭浏览器：通过 CDP 命令让浏览器自行退出，所有子进程自动清理。
+ * 如果 close() 超时，则回退到强杀进程树。
+ */
+async function closeSession(session: BrowserSession) {
+    try {
+        // browser.close() 发送 CDP Browser.close 命令，浏览器会优雅退出并清理所有子进程
+        await Promise.race([
+            session.browser.close(),
+            new Promise(r => { const t = setTimeout(r, 5000); if (typeof t === 'object') t.unref(); }),  // 5 秒超时，不阻塞事件循环
+        ]);
+    } catch (err) {
+        // close 失败（例如浏览器已崩溃），回退到强杀
+        console.error('[browser] browser.close() failed, falling back to force kill:', (err as Error).message ?? err);
+        killBrowserProcess(session);
+    }
+    try { rmSync(session.tempDir, { recursive: true, force: true }); } catch {}
+}
+
+/**
+ * 同步强杀浏览器进程树（仅在 process.on('exit') 等无法使用 async 的场景中使用）。
+ */
+function killBrowserProcess(session: BrowserSession) {
+    console.error(`[browser] Force killing browser process tree (PID: ${session.browserPid ?? 'unknown'})`);
     try { session.browser.disconnect(); } catch {}
-    if (session.browserPid) try { process.kill(session.browserPid); } catch {}
+    if (session.browserPid) {
+        if (process.platform === 'win32') {
+            // Windows 上 process.kill 只杀主进程，Edge 的子进程（GPU、渲染器等）会变成孤儿。
+            // 使用 taskkill /T 级联终止整个进程树。
+            try { execFileSync('taskkill', ['/F', '/T', '/PID', String(session.browserPid)], { windowsHide: true, timeout: 5000 }); } catch {}
+        } else {
+            try { process.kill(-session.browserPid); } catch {}        // Unix: 杀进程组
+            try { process.kill(session.browserPid); } catch {}
+        }
+    }
     try { rmSync(session.tempDir, { recursive: true, force: true }); } catch {}
 }
 
@@ -273,7 +305,7 @@ export async function getSharedBrowser(): Promise<Browser> {
             return cachedSession.browser;
         } catch {
             console.error('[browser] Cached browser session is dead, relaunching...');
-            cleanupSession(cachedSession);
+            killBrowserProcess(cachedSession);
             cachedSession = null;
         }
     }
@@ -283,24 +315,32 @@ export async function getSharedBrowser(): Promise<Browser> {
 
     if (!cleanupRegistered) {
         cleanupRegistered = true;
-        const cleanup = () => {
+        // exit 事件只能执行同步代码，使用强杀作为最后防线
+        process.once('exit', () => {
             if (cachedSession) {
-                cleanupSession(cachedSession);
+                killBrowserProcess(cachedSession);
                 cachedSession = null;
             }
+        });
+        // SIGINT/SIGTERM 可以执行异步代码，优先使用优雅关闭
+        const signalCleanup = async () => {
+            if (cachedSession) {
+                await closeSession(cachedSession);
+                cachedSession = null;
+            }
+            process.exit();
         };
-        process.once('exit', cleanup);
-        process.once('SIGINT', cleanup);
-        process.once('SIGTERM', cleanup);
+        process.once('SIGINT', signalCleanup);
+        process.once('SIGTERM', signalCleanup);
     }
 
     return cachedSession.browser;
 }
 
 /** 销毁全局浏览器会话（搜索出错时调用，下次会重新启动） */
-export function destroySharedBrowser(): void {
+export async function destroySharedBrowser(): Promise<void> {
     if (cachedSession) {
-        cleanupSession(cachedSession);
+        await closeSession(cachedSession);
         cachedSession = null;
     }
 }

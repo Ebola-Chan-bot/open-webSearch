@@ -29,4 +29,4 @@ async function testBingSearch() {
 }
 
 // Run the test
-testBingSearch().catch(console.error).finally(() => { destroySharedBrowser(); process.exit(0); });
+testBingSearch().catch(console.error).finally(async () => { await destroySharedBrowser(); process.exit(0); });

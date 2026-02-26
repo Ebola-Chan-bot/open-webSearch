@@ -64,4 +64,4 @@ async function testBingSearchQuality() {
 
 testBingSearchQuality()
     .catch(err => { console.error('❌ Test error:', err); process.exitCode = 1; })
-    .finally(() => { destroySharedBrowser(); process.exit(); });
+    .finally(async () => { await destroySharedBrowser(); process.exit(); });

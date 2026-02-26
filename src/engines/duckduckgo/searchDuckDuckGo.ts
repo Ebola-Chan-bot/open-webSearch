@@ -2,7 +2,17 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import {HttpsProxyAgent} from 'https-proxy-agent';
 import {SearchResult} from "../../types.js";
-import {getProxyUrl} from "../../config.js";
+import {getProxyUrl, config} from "../../config.js";
+
+
+/** 从错误对象提取简短消息（处理 AxiosError/AggregateError message 为空的情况） */
+function errMsg(error: unknown): string {
+    if (axios.isAxiosError(error)) {
+        return [error.code, error.message, error.response?.status && `HTTP ${error.response.status}`].filter(Boolean).join(' - ') || 'Unknown AxiosError';
+    }
+    if (error instanceof Error && error.message) return error.message;
+    return String(error) || 'Unknown error';
+}
 
 
 /**
@@ -24,7 +34,7 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
       return results;
     }
   } catch (error) {
-    console.warn('预加载URL方法失败，尝试HTML方法:', error);
+    console.warn('预加载URL方法失败，尝试HTML方法:', errMsg(error));
   }
 
   return await searchDuckDuckGoHtml(query, limit, effectiveProxyUrl);
@@ -66,7 +76,7 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
       }
 
       const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&t=h_&ia=web`;
-      const response = await axios.get(searchUrl, requestOptions);
+      const response = await axios.get(searchUrl, { ...requestOptions, timeout: config.requestTimeout });
 
       let basePreloadUrl = '';
 
@@ -120,6 +130,7 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
         // Request search results using current page URL
         const dataResponse = await axios.get(currentPageUrl, {
           ...requestOptions,
+          timeout: config.requestTimeout,
           headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
             "Connection": "keep-alive",
@@ -192,8 +203,8 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
 
       return results.slice(0, maxResults);
     } catch (error) {
-      console.error('DuckDuckGo预加载URL搜索失败:', error);
-      return [];
+      console.error(`DuckDuckGo预加载URL搜索失败: ${errMsg(error)}`);
+      throw error;
     }
   }
 
@@ -224,7 +235,7 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
     let response = await axios.post(
       requestUrl,
       new URLSearchParams({ q: query }).toString(),
-      requestOptions
+      { ...requestOptions, timeout: config.requestTimeout }
     );
 
     let $ = cheerio.load(response.data);
@@ -269,7 +280,7 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
           o: 'json',
           api: 'd.js'
         }).toString(),
-        requestOptions
+        { ...requestOptions, timeout: config.requestTimeout }
       );
 
       $ = cheerio.load(response.data);
@@ -300,7 +311,7 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
 
     return results.slice(0, maxResults);
   } catch (error) {
-    console.error('DuckDuckGo HTML search failed:', error);
-    return [];
+    console.error(`DuckDuckGo HTML search failed: ${errMsg(error)}`);
+    throw error;
   }
 }

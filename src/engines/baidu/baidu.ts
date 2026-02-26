@@ -1,6 +1,7 @@
 import * as cheerio from 'cheerio';
 import { SearchResult } from '../../types.js';
 import { getSharedBrowser, destroySharedBrowser } from '../shared/browser.js';
+import { config } from '../../config.js';
 
 export async function searchBaidu(query: string, limit: number): Promise<SearchResult[]> {
     try {
@@ -14,12 +15,12 @@ export async function searchBaidu(query: string, limit: number): Promise<SearchR
             const searchUrl = `https://www.baidu.com/s?wd=${encodeURIComponent(query)}&pn=${pn}&ie=utf-8`;
 
             try {
-                await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+                await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: config.requestTimeout });
             } catch (navErr: any) {
                 // 百度可能在导航时销毁 iframe（如天气小组件），回退到 domcontentloaded
                 if (navErr.message?.includes('frame was detached') || navErr.message?.includes('Navigating frame')) {
                     console.error('⚠️ Baidu frame detached during navigation, retrying with domcontentloaded...');
-                    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: config.requestTimeout });
                 } else {
                     throw navErr;
                 }
@@ -73,7 +74,7 @@ export async function searchBaidu(query: string, limit: number): Promise<SearchR
 
         return allResults.slice(0, limit);
     } catch (err) {
-        destroySharedBrowser();
+        await destroySharedBrowser();
         throw err;
     }
 }

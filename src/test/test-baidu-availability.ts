@@ -87,4 +87,4 @@ async function testBaiduAvailability() {
     process.exit(passed === total ? 0 : 1);
 }
 
-testBaiduAvailability().catch(console.error).finally(() => { destroySharedBrowser(); process.exit(0); });
+testBaiduAvailability().catch(console.error).finally(async () => { await destroySharedBrowser(); process.exit(0); });

@@ -1,6 +1,7 @@
 import * as cheerio from 'cheerio';
 import { SearchResult } from '../../types.js';
 import { getSharedBrowser, destroySharedBrowser } from '../shared/browser.js';
+import { config } from '../../config.js';
 
 /**
  * 解码 Bing 重定向 URL，提取实际目标地址。
@@ -57,7 +58,7 @@ export async function searchBing(query: string, limit: number): Promise<SearchRe
 
         try {
             const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
-            await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+            await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: config.requestTimeout });
             await new Promise(r => setTimeout(r, 500));
             let allResults = parsePageResults(await page.content());
 
@@ -65,7 +66,7 @@ export async function searchBing(query: string, limit: number): Promise<SearchRe
                 const nextLink = await page.$('.sb_pagN');
                 if (!nextLink) break;
                 // Bing 翻页可能用完整导航或 AJAX，两种方式都要兼容
-                const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
+                const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: config.requestTimeout }).catch(() => {});
                 await nextLink.click();
                 await navPromise;
                 await new Promise(r => setTimeout(r, 1000));
@@ -79,7 +80,7 @@ export async function searchBing(query: string, limit: number): Promise<SearchRe
             await page.close();
         }
     } catch (err) {
-        destroySharedBrowser();
+        await destroySharedBrowser();
         throw err;
     }
 }

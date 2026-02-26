@@ -1,6 +1,7 @@
 import { searchBing } from '../engines/bing/index.js';
 import { SearchResult } from '../types.js';
 import { config } from '../config.js';
+import { destroySharedBrowser } from '../engines/shared/browser.js';
 
 // 与 setupTools.ts 中相同的截断逻辑
 function truncateDescriptions(results: SearchResult[], descLimit?: number): SearchResult[] {
@@ -85,5 +86,4 @@ async function testDescriptionLength() {
 
 testDescriptionLength().catch(e => {
     console.error('❌ 测试异常:', e);
-    process.exit(1);
-});
+}).finally(async () => { await destroySharedBrowser(); process.exit(0); });
