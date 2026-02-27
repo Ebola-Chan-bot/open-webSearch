@@ -226,13 +226,30 @@ export const setupTools = (server: McpServer): void => {
 
                 const { results, errors } = await executeSearch(query.trim(), engines, limit);
 
-                // 所有引擎全部失败 → 返回 isError
-                if (results.length === 0 && errors.length > 0) {
+                // 所有引擎全部失败（错误数 == 引擎数）→ 返回 isError
+                if (errors.length === engines.length) {
                     const errorDetail = errors.map(e => `${e.engine}: ${e.message}`).join('\n');
                     return {
                         content: [{
                             type: 'text',
                             text: `All search engines failed:\n${errorDetail}`
+                        }],
+                        isError: true
+                    };
+                }
+
+                // 0 结果但只有部分引擎失败 → 也标记为错误，列出各引擎状态
+                if (results.length === 0 && errors.length > 0) {
+                    const failedSet = new Set(errors.map(e => e.engine));
+                    const succeededEngines = engines.filter(e => !failedSet.has(e));
+                    const lines = errors.map(e => `${e.engine}: ${e.message}`);
+                    if (succeededEngines.length > 0) {
+                        lines.push(`${succeededEngines.join(', ')}: returned 0 results`);
+                    }
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: `No results found:\n${lines.join('\n')}`
                         }],
                         isError: true
                     };
