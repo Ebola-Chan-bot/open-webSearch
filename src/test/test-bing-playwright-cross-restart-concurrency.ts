@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
 import { createOpenWebSearchRuntime } from '../runtime/createRuntime.js';
 import { startLocalDaemon } from '../adapters/http/localDaemon.js';
@@ -25,6 +26,7 @@ type SearchResponseEnvelope = {
         code: string;
         message: string;
     };
+    hint?: string | null;
 };
 
 type QueryExpectation = {
@@ -40,20 +42,61 @@ type ScoredSearchResult = {
     matchedGroups: string[];
 };
 
+type BrowserRootInfo = {
+    pid: number;
+    commandLine: string;
+};
+
+type BrowserTabSnapshot = {
+    totalTabs: number;
+    perRoot: Array<{
+        pid: number;
+        port: number;
+        tabCount: number;
+    }>;
+};
+
+type CliSearchRun = {
+    query: string;
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+    response: SearchResponseEnvelope;
+};
+
+type HiddenRoundChildResult = {
+    label: string;
+    results: SearchResponse[];
+};
+
+type HiddenRoundHandle = {
+    label: string;
+    process: any;
+    result: HiddenRoundChildResult;
+    close(): Promise<void>;
+};
+
 const phase1Queries = [
     'fsutil quota',
     '古斯塔夫鳄鱼',
-    'git blame'
+    'git blame',
+    'visual studio'
 ];
 
 const phase2Queries = [
     'elasid 蛇女',
     '蚊 小说',
-    '磁盘配额不足，但是找不到占用空间的文件'
+    '磁盘配额不足，但是找不到占用空间的文件',
+    '通假字是错别字吗'
 ];
 
-// 把“结果是否相关”的判断并入正式并发/跨重启测试，避免只能人工看输出，
-// 并且让每个查询都用可解释的关键词组规则校验命中结果是否仍然贴近原查询语义。
+const phase3Queries = [
+    '狗彘食人食而不知检，涂有饿莩而不知发',
+    '🩠',
+    '沙花叉',
+    '抑制性神经元'
+];
+
 const queryExpectations = new Map<string, QueryExpectation>([
     ['fsutil quota', {
         minimumGroupMatches: 2,
@@ -74,6 +117,13 @@ const queryExpectations = new Map<string, QueryExpectation>([
         groups: [
             { label: 'git', anyOf: ['git'] },
             { label: 'blame', anyOf: ['blame'] }
+        ]
+    }],
+    ['visual studio', {
+        minimumGroupMatches: 2,
+        groups: [
+            { label: 'visual', anyOf: ['visual'] },
+            { label: 'studio-or-vs', anyOf: ['studio', 'vs', 'visual studio'] }
         ]
     }],
     ['elasid 蛇女', {
@@ -97,6 +147,42 @@ const queryExpectations = new Map<string, QueryExpectation>([
             { label: '配额-or-quota', anyOf: ['配额', 'quota'] },
             { label: '文件-or-占用', anyOf: ['文件', '占用'] }
         ]
+    }],
+    ['通假字是错别字吗', {
+        minimumGroupMatches: 2,
+        groups: [
+            { label: '通假字', anyOf: ['通假字'] },
+            { label: '错别字', anyOf: ['错别字'] }
+        ]
+    }],
+    ['狗彘食人食而不知检，涂有饿莩而不知发', {
+        minimumGroupMatches: 2,
+        groups: [
+            { label: '狗彘食人食', anyOf: ['狗彘食人食'] },
+            { label: '饿莩', anyOf: ['饿莩'] },
+            { label: '孟子-or-梁惠王', anyOf: ['孟子', '梁惠王'] }
+        ]
+    }],
+    ['🩠', {
+        minimumGroupMatches: 1,
+        groups: [
+            { label: 'emoji-or-表情', anyOf: ['🩠', 'emoji', '表情'] },
+            { label: '缝合-or-suture', anyOf: ['缝合', 'suture'] }
+        ]
+    }],
+    ['沙花叉', {
+        minimumGroupMatches: 1,
+        groups: [
+            { label: '沙花叉', anyOf: ['沙花叉'] },
+            { label: 'hololive-or-vtuber', anyOf: ['hololive', 'vtuber', 'houshou', 'marine'] }
+        ]
+    }],
+    ['抑制性神经元', {
+        minimumGroupMatches: 2,
+        groups: [
+            { label: '抑制性', anyOf: ['抑制性'] },
+            { label: '神经元', anyOf: ['神经元'] }
+        ]
     }]
 ]);
 
@@ -114,7 +200,7 @@ function runPowerShell(command: string): string {
 }
 
 function listRootPids(): number[] {
-    const raw = runPowerShell("Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'msedge.exe' -and $_.CommandLine -match 'mcp-search-' -and $_.CommandLine -match '--remote-debugging-port=' -and $_.CommandLine -notmatch '--type=' } | Select-Object -ExpandProperty ProcessId | Sort-Object | ConvertTo-Json -Compress");
+    const raw = runPowerShell("Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'msedge.exe' -or $_.Name -eq 'chrome.exe') -and $_.CommandLine -match 'mcp-search-' -and $_.CommandLine -match '--remote-debugging-port=' -and $_.CommandLine -notmatch '--type=' } | Select-Object -ExpandProperty ProcessId | Sort-Object | ConvertTo-Json -Compress");
     if (!raw) {
         return [];
     }
@@ -123,9 +209,30 @@ function listRootPids(): number[] {
     return Array.isArray(parsed) ? parsed : [parsed];
 }
 
-function listRendererCount(): number {
-    const raw = runPowerShell("Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'msedge.exe' -and $_.CommandLine -match 'mcp-search-' -and $_.CommandLine -match '--type=renderer' } | Measure-Object | Select-Object -ExpandProperty Count | Out-String");
-    return Number.parseInt(raw.trim(), 10) || 0;
+function listBrowserRootInfos(): BrowserRootInfo[] {
+    const raw = runPowerShell("Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'msedge.exe' -or $_.Name -eq 'chrome.exe') -and $_.CommandLine -match 'mcp-search-' -and $_.CommandLine -match '--remote-debugging-port=' -and $_.CommandLine -notmatch '--type=' } | Select-Object ProcessId, CommandLine | Sort-Object ProcessId | ConvertTo-Json -Compress");
+    if (!raw) {
+        return [];
+    }
+
+    const parsed = JSON.parse(raw) as Array<{ ProcessId?: number; CommandLine?: string }> | { ProcessId?: number; CommandLine?: string };
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    return items
+        .map((item) => ({
+            pid: Number(item.ProcessId),
+            commandLine: String(item.CommandLine || '')
+        }))
+        .filter((item) => Number.isInteger(item.pid) && item.pid > 0 && item.commandLine.length > 0);
+}
+
+function listHiddenRootPids(): number[] {
+    const raw = runPowerShell("Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'msedge.exe' -or $_.Name -eq 'chrome.exe') -and $_.CommandLine -match 'mcp-search-' -and $_.CommandLine -match '--remote-debugging-port=' -and $_.CommandLine -match '--window-position=-32000,-32000' -and $_.CommandLine -notmatch '--type=' } | Select-Object -ExpandProperty ProcessId | Sort-Object | ConvertTo-Json -Compress");
+    if (!raw) {
+        return [];
+    }
+
+    const parsed = JSON.parse(raw) as number[] | number;
+    return Array.isArray(parsed) ? parsed : [parsed];
 }
 
 function diffRoots(nextRoots: number[], previousRoots: number[]): number[] {
@@ -139,6 +246,63 @@ function rootsEqual(left: number[], right: number[]): boolean {
     }
 
     return left.every((value, index) => value === right[index]);
+}
+
+function extractDebugPort(commandLine: string): number | null {
+    const match = commandLine.match(/--remote-debugging-port=(\d+)/);
+    if (!match) {
+        return null;
+    }
+
+    const port = Number.parseInt(match[1], 10);
+    return Number.isInteger(port) && port > 0 ? port : null;
+}
+
+async function listBrowserTabSnapshot(): Promise<BrowserTabSnapshot> {
+    const perRoot = await Promise.all(listBrowserRootInfos().map(async (root) => {
+        const port = extractDebugPort(root.commandLine);
+        if (!port) {
+            return null;
+        }
+
+        try {
+            const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+            if (!response.ok) {
+                return { pid: root.pid, port, tabCount: 0 };
+            }
+
+            const targets = await response.json() as Array<{ type?: string }>;
+            return {
+                pid: root.pid,
+                port,
+                tabCount: Array.isArray(targets)
+                    ? targets.filter((target) => target?.type === 'page').length
+                    : 0
+            };
+        } catch {
+            return { pid: root.pid, port, tabCount: 0 };
+        }
+    }));
+
+    const normalizedPerRoot = perRoot
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+        .sort((left, right) => left.pid - right.pid);
+
+    return {
+        totalTabs: normalizedPerRoot.reduce((sum, entry) => sum + entry.tabCount, 0),
+        perRoot: normalizedPerRoot
+    };
+}
+
+function hasAnyEqualTabCount(counts: number[]): boolean {
+    const seen = new Set<number>();
+    for (const count of counts) {
+        if (seen.has(count)) {
+            return true;
+        }
+        seen.add(count);
+    }
+    return false;
 }
 
 function normalizeText(value: string): string {
@@ -175,9 +339,7 @@ function assertRelevantResults(label: string, query: string, results: SearchResu
     assertCondition(results.length > 0, `${label} query returned no results: ${query}`);
 
     const scoredResults = results.map((result) => scoreSearchResult(result, expectation));
-    const bestResult = scoredResults.reduce((best, current) => (
-        current.matchedGroups.length > best.matchedGroups.length ? current : best
-    ));
+    const matchedGroupsAcrossResults = [...new Set(scoredResults.flatMap((scoredResult) => scoredResult.matchedGroups))];
 
     for (const [index, scoredResult] of scoredResults.entries()) {
         const matches = scoredResult.matchedGroups.length > 0 ? scoredResult.matchedGroups.join(',') : '(none)';
@@ -185,9 +347,120 @@ function assertRelevantResults(label: string, query: string, results: SearchResu
     }
 
     assertCondition(
-        bestResult.matchedGroups.length >= expectation.minimumGroupMatches,
-        `${label} query produced weakly related results: ${query}; bestMatches=${bestResult.matchedGroups.join(',') || '(none)'}; preview=${formatResultPreview(bestResult.result)}`
+        matchedGroupsAcrossResults.length >= expectation.minimumGroupMatches,
+        `${label} query produced weakly related results: ${query}; aggregateMatches=${matchedGroupsAcrossResults.join(',') || '(none)'}; previews=${scoredResults.map((scoredResult) => formatResultPreview(scoredResult.result)).join(' || ')}`
     );
+}
+
+function parseSearchResponse(query: string, body: string, statusCode = 200): SearchResponse {
+    let payload: SearchResponseEnvelope | undefined;
+    try {
+        payload = JSON.parse(body) as SearchResponseEnvelope;
+    } catch {
+        payload = undefined;
+    }
+
+    return {
+        query,
+        status: statusCode,
+        body,
+        envelopeStatus: payload?.status ?? null,
+        totalResults: payload?.data?.totalResults ?? 0,
+        results: payload?.data?.results ?? [],
+        partialFailures: payload?.data?.partialFailures ?? []
+    };
+}
+
+function validateSearchResponse(label: string, response: SearchResponse): void {
+    console.log(`${label} query=${response.query} status=${response.status}`);
+    assertCondition(response.status === 200, `${label} query failed: ${response.query} => ${response.status}`);
+    assertCondition(response.envelopeStatus === 'ok', `${label} query returned invalid payload: ${response.query}; body=${response.body}`);
+    assertCondition(response.partialFailures.length === 0, `${label} query had partial failures: ${response.query} => ${JSON.stringify(response.partialFailures)}`);
+    assertCondition(response.totalResults > 0, `${label} query returned zero results: ${response.query}; body=${response.body}`);
+    assertRelevantResults(label, response.query, response.results);
+}
+
+function getBaseChildEnv(headless: boolean): NodeJS.ProcessEnv {
+    return {
+        ...process.env,
+        SEARCH_MODE: 'playwright',
+        DEFAULT_SEARCH_ENGINE: 'bing',
+        PLAYWRIGHT_HEADLESS: headless ? 'true' : 'false'
+    };
+}
+
+function spawnNodeProcess(scriptPath: string, args: string[], env: NodeJS.ProcessEnv) {
+    return spawn(process.execPath, [scriptPath, ...args], {
+        cwd: process.cwd(),
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true
+    });
+}
+
+async function runHeadedCliSearch(query: string): Promise<CliSearchRun> {
+    return new Promise((resolve, reject) => {
+        const child = spawnNodeProcess('build/index.js', [
+            'search',
+            query,
+            '--engine', 'bing',
+            '--search-mode', 'playwright',
+            '--limit', '3',
+            '--json'
+        ], getBaseChildEnv(false));
+
+        let stdout = '';
+        let stderr = '';
+
+        child.stdout.on('data', (chunk) => {
+            stdout += String(chunk);
+        });
+        child.stderr.on('data', (chunk) => {
+            stderr += String(chunk);
+        });
+        child.on('error', reject);
+        child.on('close', (exitCode) => {
+            const response = parseSearchResponse(query, stdout, exitCode === 0 ? 200 : 500);
+            resolve({
+                query,
+                exitCode,
+                stdout,
+                stderr,
+                response: {
+                    status: response.envelopeStatus || 'error',
+                    data: {
+                        query: response.query,
+                        totalResults: response.totalResults,
+                        results: response.results,
+                        partialFailures: response.partialFailures
+                    }
+                }
+            });
+        });
+    });
+}
+
+async function runHeadedRound(label: string, queries: string[]) {
+    const beforeRoots = listRootPids();
+    const beforeTabs = await listBrowserTabSnapshot();
+    console.log(`${label} headed before roots=${JSON.stringify(beforeRoots)} tabs=${beforeTabs.totalTabs} tabDetails=${JSON.stringify(beforeTabs.perRoot)}`);
+
+    const runs = await Promise.all(queries.map((query) => runHeadedCliSearch(query)));
+    for (const run of runs) {
+        assertCondition(run.exitCode === 0, `${label} headed child failed: ${run.query}; stderr=${run.stderr}; stdout=${run.stdout}`);
+        validateSearchResponse(`${label}-headed`, parseSearchResponse(run.query, run.stdout));
+    }
+
+    const afterRoots = listRootPids();
+    const afterTabs = await listBrowserTabSnapshot();
+    console.log(`${label} headed after roots=${JSON.stringify(afterRoots)} tabs=${afterTabs.totalTabs} tabDetails=${JSON.stringify(afterTabs.perRoot)}`);
+
+    return {
+        beforeRoots,
+        beforeTabs,
+        afterRoots,
+        afterTabs
+    };
 }
 
 async function searchOnce(baseUrl: string, query: string): Promise<SearchResponse> {
@@ -202,102 +475,205 @@ async function searchOnce(baseUrl: string, query: string): Promise<SearchRespons
         })
     });
 
-    const body = await response.text();
-    let payload: SearchResponseEnvelope | undefined;
-    try {
-        payload = JSON.parse(body) as SearchResponseEnvelope;
-    } catch {
-        payload = undefined;
-    }
-
-    return {
-        query,
-        status: response.status,
-        body,
-        envelopeStatus: payload?.status ?? null,
-        totalResults: payload?.data?.totalResults ?? 0,
-        results: payload?.data?.results ?? [],
-        partialFailures: payload?.data?.partialFailures ?? []
-    };
+    return parseSearchResponse(query, await response.text(), response.status);
 }
 
-async function runPhase(version: string, label: string, queries: string[]) {
+async function runHiddenRoundChild(label: string, queries: string[]): Promise<void> {
     const runtime = createOpenWebSearchRuntime();
-    const daemon = await startLocalDaemon(runtime, { port: 0, version });
-    const beforeRoots = listRootPids();
-    const beforeRenderers = listRendererCount();
-
-    console.log(`${label} before roots=${JSON.stringify(beforeRoots)} renderers=${beforeRenderers}`);
+    const daemon = await startLocalDaemon(runtime, { port: 0, version: `hidden-${label}` });
 
     try {
         const results = await Promise.all(queries.map((query) => searchOnce(daemon.baseUrl, query)));
         for (const result of results) {
-            console.log(`${label} query=${result.query} status=${result.status}`);
-            assertCondition(result.status === 200, `${label} query failed: ${result.query} => ${result.status}`);
-            assertCondition(result.envelopeStatus === 'ok', `${label} query returned invalid payload: ${result.query}; body=${result.body}`);
-            assertCondition(result.partialFailures.length === 0, `${label} query had partial failures: ${result.query} => ${JSON.stringify(result.partialFailures)}`);
-            assertCondition(result.totalResults > 0, `${label} query returned zero results: ${result.query}; body=${result.body}`);
-            assertRelevantResults(label, result.query, result.results);
+            validateSearchResponse(`${label}-hidden-child`, result);
         }
 
-        const afterConcurrentRoots = listRootPids();
-        const afterConcurrentRenderers = listRendererCount();
-        console.log(`${label} afterConcurrent roots=${JSON.stringify(afterConcurrentRoots)} renderers=${afterConcurrentRenderers}`);
+        process.stdout.write(`HIDDEN_ROUND_RESULT\t${JSON.stringify({ label, results })}\n`);
 
-        return {
-            beforeRoots,
-            beforeRenderers,
-            afterConcurrentRoots,
-            afterConcurrentRenderers
-        };
+        await new Promise<void>((resolve) => {
+            process.stdin.resume();
+            process.stdin.once('end', () => resolve());
+            process.stdin.once('close', () => resolve());
+        });
     } finally {
         await daemon.close();
-        const afterCloseRoots = listRootPids();
-        const afterCloseRenderers = listRendererCount();
-        console.log(`${label} afterClose roots=${JSON.stringify(afterCloseRoots)} renderers=${afterCloseRenderers}`);
     }
+}
+
+async function startHiddenRound(label: string, queries: string[]): Promise<HiddenRoundHandle> {
+    return new Promise((resolve, reject) => {
+        const child = spawnNodeProcess('build/test/test-bing-playwright-cross-restart-concurrency.js', [
+            '--hidden-round',
+            label,
+            ...queries
+        ], getBaseChildEnv(true));
+
+        let stdout = '';
+        let stderr = '';
+        let settled = false;
+
+        child.stdout.on('data', (chunk) => {
+            stdout += String(chunk);
+            const marker = stdout.split(/\r?\n/).find((line) => line.startsWith('HIDDEN_ROUND_RESULT\t'));
+            if (!marker || settled) {
+                return;
+            }
+
+            settled = true;
+            const json = marker.slice('HIDDEN_ROUND_RESULT\t'.length);
+            const result = JSON.parse(json) as HiddenRoundChildResult;
+            resolve({
+                label,
+                process: child,
+                result,
+                close: async () => {
+                    if (!child.killed) {
+                        child.stdin.end();
+                    }
+                    await new Promise<void>((closeResolve, closeReject) => {
+                        child.once('close', (exitCode) => {
+                            if (exitCode === 0) {
+                                closeResolve();
+                                return;
+                            }
+                            closeReject(new Error(`${label} hidden child exited unexpectedly: ${exitCode}; stderr=${stderr}; stdout=${stdout}`));
+                        });
+                        child.once('error', closeReject);
+                    });
+                }
+            });
+        });
+
+        child.stderr.on('data', (chunk) => {
+            stderr += String(chunk);
+        });
+        child.on('error', reject);
+        child.on('close', (exitCode) => {
+            if (!settled) {
+                reject(new Error(`${label} hidden child exited before reporting result: ${exitCode}; stderr=${stderr}; stdout=${stdout}`));
+            }
+        });
+    });
+}
+
+async function runHiddenScenario(): Promise<void> {
+    const phaseQueries = [phase1Queries, phase2Queries, phase3Queries];
+    const labels = ['phase1', 'phase2', 'phase3'];
+    const handles: HiddenRoundHandle[] = [];
+    const tabCounts: number[] = [];
+
+    try {
+        for (let index = 0; index < phaseQueries.length; index += 1) {
+            const label = labels[index];
+            const beforeRoots = listHiddenRootPids();
+            const beforeTabs = await listBrowserTabSnapshot();
+            console.log(`${label} hidden before roots=${JSON.stringify(beforeRoots)} tabs=${beforeTabs.totalTabs} tabDetails=${JSON.stringify(beforeTabs.perRoot)}`);
+
+            const handle = await startHiddenRound(label, phaseQueries[index]);
+            handles.push(handle);
+
+            for (const result of handle.result.results) {
+                validateSearchResponse(`${label}-hidden`, result);
+            }
+
+            const afterRoots = listHiddenRootPids();
+            const afterTabs = await listBrowserTabSnapshot();
+            console.log(`${label} hidden after roots=${JSON.stringify(afterRoots)} tabs=${afterTabs.totalTabs} tabDetails=${JSON.stringify(afterTabs.perRoot)}`);
+
+            if (index === 0) {
+                const newRoots = diffRoots(afterRoots, beforeRoots);
+                assertCondition(newRoots.length <= 1, `${label} hidden should add at most one browser root, before=${JSON.stringify(beforeRoots)} after=${JSON.stringify(afterRoots)}`);
+            } else {
+                assertCondition(rootsEqual(afterRoots, beforeRoots), `${label} hidden should reuse the same browser roots, before=${JSON.stringify(beforeRoots)} after=${JSON.stringify(afterRoots)}`);
+            }
+
+            tabCounts.push(afterTabs.totalTabs);
+        }
+
+        assertCondition(
+            tabCounts.some((count) => count > 0),
+            `hidden rounds could not observe any browser tabs, counts=${JSON.stringify(tabCounts)}`
+        );
+        assertCondition(
+            hasAnyEqualTabCount(tabCounts),
+            `hidden tab reuse check expected at least two rounds to report the same tab count, counts=${JSON.stringify(tabCounts)}`
+        );
+    } finally {
+        for (const handle of handles.reverse()) {
+            await handle.close();
+        }
+    }
+
+    const rootsAfterClose = listHiddenRootPids();
+    assertCondition(rootsAfterClose.length === 0, `hidden browsers should auto close after all holder processes exit, actual=${JSON.stringify(rootsAfterClose)}`);
 }
 
 async function main(): Promise<void> {
     assertCondition(process.platform === 'win32', 'This test currently requires Windows process inspection');
     assertCondition(process.env.SEARCH_MODE === 'playwright', 'Set SEARCH_MODE=playwright before running this test');
     assertCondition(process.env.DEFAULT_SEARCH_ENGINE === 'bing', 'Set DEFAULT_SEARCH_ENGINE=bing before running this test');
+
+    if (process.argv[2] === '--hidden-round') {
+        const label = process.argv[3];
+        const queries = process.argv.slice(4);
+        assertCondition(queries.length === 4, `hidden round requires exactly 4 queries, received=${queries.length}`);
+        await runHiddenRoundChild(label, queries);
+        return;
+    }
+
     assertCondition(process.env.PLAYWRIGHT_HEADLESS === 'false', 'Set PLAYWRIGHT_HEADLESS=false before running this test');
 
-    console.log('Bing headed Playwright cross-restart concurrency test config:', {
+    console.log('Bing Playwright cross-restart concurrency test config:', {
         searchMode: process.env.SEARCH_MODE,
         defaultEngine: process.env.DEFAULT_SEARCH_ENGINE,
         playwrightHeadless: process.env.PLAYWRIGHT_HEADLESS,
         navigationTimeoutMs: process.env.PLAYWRIGHT_NAVIGATION_TIMEOUT_MS || '(default)'
     });
 
-    const phase1 = await runPhase('bing-playwright-cross-restart-1', 'phase1', phase1Queries);
-    const phase1NewRoots = diffRoots(phase1.afterConcurrentRoots, phase1.beforeRoots);
+    const headedRounds = [
+        await runHeadedRound('phase1', phase1Queries),
+        await runHeadedRound('phase2', phase2Queries),
+        await runHeadedRound('phase3', phase3Queries)
+    ];
+
+    const phase1NewRoots = diffRoots(headedRounds[0].afterRoots, headedRounds[0].beforeRoots);
     assertCondition(
         phase1NewRoots.length <= 1,
-        `phase1 should add at most one browser root, before=${JSON.stringify(phase1.beforeRoots)} after=${JSON.stringify(phase1.afterConcurrentRoots)}`
-    );
-
-    const rootsAfterPhase1Close = listRootPids();
-    assertCondition(
-        rootsEqual(rootsAfterPhase1Close, phase1.afterConcurrentRoots),
-        `headed browser roots should stay stable after phase1 close, expected=${JSON.stringify(phase1.afterConcurrentRoots)} actual=${JSON.stringify(rootsAfterPhase1Close)}`
-    );
-
-    const phase2 = await runPhase('bing-playwright-cross-restart-2', 'phase2', phase2Queries);
-    assertCondition(
-        rootsEqual(phase2.beforeRoots, rootsAfterPhase1Close),
-        `phase2 should start from the same reusable browser roots, expected=${JSON.stringify(rootsAfterPhase1Close)} actual=${JSON.stringify(phase2.beforeRoots)}`
+        `phase1 headed should add at most one browser root, before=${JSON.stringify(headedRounds[0].beforeRoots)} after=${JSON.stringify(headedRounds[0].afterRoots)}`
     );
     assertCondition(
-        rootsEqual(phase2.afterConcurrentRoots, phase2.beforeRoots),
-        `phase2 concurrent run should not create an extra browser root, before=${JSON.stringify(phase2.beforeRoots)} after=${JSON.stringify(phase2.afterConcurrentRoots)}`
+        rootsEqual(headedRounds[1].beforeRoots, headedRounds[0].afterRoots),
+        `phase2 headed should start from the same reusable browser roots, expected=${JSON.stringify(headedRounds[0].afterRoots)} actual=${JSON.stringify(headedRounds[1].beforeRoots)}`
+    );
+    assertCondition(
+        rootsEqual(headedRounds[1].afterRoots, headedRounds[1].beforeRoots),
+        `phase2 headed should not create extra browser roots, before=${JSON.stringify(headedRounds[1].beforeRoots)} after=${JSON.stringify(headedRounds[1].afterRoots)}`
+    );
+    assertCondition(
+        rootsEqual(headedRounds[2].beforeRoots, headedRounds[1].afterRoots),
+        `phase3 headed should start from the same reusable browser roots, expected=${JSON.stringify(headedRounds[1].afterRoots)} actual=${JSON.stringify(headedRounds[2].beforeRoots)}`
+    );
+    assertCondition(
+        rootsEqual(headedRounds[2].afterRoots, headedRounds[2].beforeRoots),
+        `phase3 headed should not create extra browser roots, before=${JSON.stringify(headedRounds[2].beforeRoots)} after=${JSON.stringify(headedRounds[2].afterRoots)}`
     );
 
-    console.log('Bing headed Playwright cross-restart concurrency test passed.');
+    const headedTabCounts = headedRounds.map((round) => round.afterTabs.totalTabs);
+    assertCondition(
+        headedTabCounts.some((count) => count > 0),
+        `headed rounds could not observe any browser tabs, counts=${JSON.stringify(headedTabCounts)}`
+    );
+    assertCondition(
+        hasAnyEqualTabCount(headedTabCounts),
+        `headed tab reuse check expected at least two rounds to report the same tab count, counts=${JSON.stringify(headedTabCounts)}`
+    );
+
+    await runHiddenScenario();
+
+    console.log('Bing headed/hidden Playwright cross-restart concurrency test passed.');
 }
 
 main().catch((error) => {
-    console.error('Bing headed Playwright cross-restart concurrency test failed:', error);
+    console.error('Bing headed/hidden Playwright cross-restart concurrency test failed:', error);
     process.exit(1);
 });

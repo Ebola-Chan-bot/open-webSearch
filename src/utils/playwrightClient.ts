@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from 'child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { createHash } from 'crypto';
 import { createRequire } from 'module';
 import { createServer } from 'net';
 import { tmpdir } from 'os';
@@ -45,13 +46,15 @@ type LoadPlaywrightClientOptions = {
     silent?: boolean;
 };
 
+type LocalBrowserSessionMode = 'headed' | 'headless' | 'hidden-headed';
+
 type LocalBrowserSession = {
     browser: any;
     sessionKey: string;
+    sessionMode: LocalBrowserSessionMode;
     browserPid?: number;
     debugPort?: number;
     tempDir?: string;
-    strictCleanup: boolean;
     closeBrowser(): Promise<void>;
     forceKill(): void;
 };
@@ -63,8 +66,11 @@ type LocalBrowserSessionMetadata = {
     tempDir: string;
     executablePath: string;
     sessionKey: string;
+    compatibilityKey: string;
+    sessionMode: LocalBrowserSessionMode;
     hideWindow: boolean;
     strictCleanup: boolean;
+    clientPids: number[];
     createdAt: string;
 };
 
@@ -76,11 +82,13 @@ type PooledPlaywrightPageEntry = {
 };
 
 type BrowserPlaywrightPagePool = {
+    poolKey: string;
     sharedContext: any | null;
     entries: PooledPlaywrightPageEntry[];
     preparePage?: (page: any) => Promise<void>;
     contextOptions?: any;
     preferExistingContext: boolean;
+    acquireLock: Promise<void> | null;
 };
 
 let playwrightModulePromise: Promise<PlaywrightModule | null> | null = null;
@@ -91,12 +99,24 @@ let cachedBrowserPath: string | null = null;
 let cachedLocalBrowserSession: LocalBrowserSession | null = null;
 let localBrowserSessionPromise: Promise<LocalBrowserSession> | null = null;
 let cachedLocalBrowserSessionKey: string | null = null;
+let cachedLocalBrowserSessionOptions: {
+    headless: boolean;
+    launchArgs: string[];
+    options?: OpenPlaywrightBrowserOptions;
+} | null = null;
 let cleanupRegistered = false;
 let staleBrowserCleanupPerformed = false;
 const LOCAL_BROWSER_SESSION_METADATA_FILE = 'open-websearch-session.json';
 const LOCAL_BROWSER_SESSION_REGISTRY_FILE = 'open-websearch-local-browser-sessions.json';
 const LEGACY_ORPHAN_BROWSER_GRACE_PERIOD_MS = 60 * 1000;
+const CROSS_PROCESS_POOL_LOCK_ROOT = path.join(tmpdir(), 'open-websearch-page-pool-locks');
+const CROSS_PROCESS_POOL_LOCK_STALE_MS = Math.max(config.playwrightNavigationTimeoutMs * 3, 60 * 1000);
+const CROSS_PROCESS_BROWSER_SESSION_LOCK_ROOT = path.join(tmpdir(), 'open-websearch-browser-session-locks');
+const CROSS_PROCESS_BROWSER_SESSION_LOCK_STALE_MS = Math.max(config.playwrightNavigationTimeoutMs * 3, 60 * 1000);
+const PAGE_LEASE_STALE_MS = Math.max(config.playwrightNavigationTimeoutMs * 3, 60 * 1000);
+const OPEN_WEBSEARCH_PAGE_STATE_PREFIX = '__open_websearch_page_state__:';
 const browserPlaywrightPagePools = new WeakMap<any, Map<string, BrowserPlaywrightPagePool>>();
+const currentProcessLeaseOwner = `${process.pid}:${createHash('sha1').update(`${process.pid}:${Date.now()}:${Math.random()}`).digest('hex').slice(0, 12)}`;
 
 type LocalBrowserSessionRegistryEntry = {
     tempDir: string;
@@ -107,8 +127,22 @@ type LocalBrowserSessionRegistry = {
     sessions: Record<string, LocalBrowserSessionRegistryEntry>;
 };
 
+type OpenWebSearchPageState = {
+    poolKey: string;
+    leaseOwner: string | null;
+    leaseTimestamp: number | null;
+};
+
 function shouldUseStrictLocalBrowserCleanup(headless: boolean, options?: OpenPlaywrightBrowserOptions): boolean {
-    return headless || options?.hideWindow === true;
+    return headless && options?.hideWindow !== true;
+}
+
+function getLocalBrowserSessionMode(headless: boolean, options?: OpenPlaywrightBrowserOptions): LocalBrowserSessionMode {
+    if (options?.hideWindow) {
+        return 'hidden-headed';
+    }
+
+    return headless ? 'headless' : 'headed';
 }
 
 function getBrowserPlaywrightPagePool(browser: any, options?: AcquirePlaywrightPageOptions): BrowserPlaywrightPagePool {
@@ -125,14 +159,166 @@ function getBrowserPlaywrightPagePool(browser: any, options?: AcquirePlaywrightP
     }
 
     pool = {
+        poolKey,
         sharedContext: null,
         entries: [],
         preparePage: options?.preparePage,
         contextOptions: options?.contextOptions,
-        preferExistingContext: options?.preferExistingContext !== false
+        preferExistingContext: options?.preferExistingContext !== false,
+        acquireLock: null
     };
     browserPools.set(poolKey, pool);
     return pool;
+}
+
+async function withPoolAcquireLock<T>(pool: BrowserPlaywrightPagePool, operation: () => Promise<T>): Promise<T> {
+    while (pool.acquireLock) {
+        await pool.acquireLock;
+    }
+
+    let releaseLock!: () => void;
+    pool.acquireLock = new Promise<void>((resolve) => {
+        releaseLock = resolve;
+    });
+
+    try {
+        return await operation();
+    } finally {
+        pool.acquireLock = null;
+        releaseLock();
+    }
+}
+
+function ensureCrossProcessPoolLockRoot(): void {
+    if (!existsSync(CROSS_PROCESS_POOL_LOCK_ROOT)) {
+        mkdirSync(CROSS_PROCESS_POOL_LOCK_ROOT, { recursive: true });
+    }
+}
+
+function ensureCrossProcessBrowserSessionLockRoot(): void {
+    if (!existsSync(CROSS_PROCESS_BROWSER_SESSION_LOCK_ROOT)) {
+        mkdirSync(CROSS_PROCESS_BROWSER_SESSION_LOCK_ROOT, { recursive: true });
+    }
+}
+
+function buildCrossProcessPoolLockKey(poolKey: string): string {
+    const material = JSON.stringify({
+        sessionKey: cachedLocalBrowserSessionKey ?? null,
+        wsEndpoint: config.playwrightWsEndpoint ?? null,
+        cdpEndpoint: config.playwrightCdpEndpoint ?? null,
+        executablePath: config.playwrightExecutablePath ?? null,
+        poolKey
+    });
+    return createHash('sha1').update(material).digest('hex');
+}
+
+function getCrossProcessPoolLockPath(poolKey: string): string {
+    ensureCrossProcessPoolLockRoot();
+    return path.join(CROSS_PROCESS_POOL_LOCK_ROOT, buildCrossProcessPoolLockKey(poolKey));
+}
+
+function getCrossProcessBrowserSessionLockPath(sessionKey: string): string {
+    ensureCrossProcessBrowserSessionLockRoot();
+    return path.join(
+        CROSS_PROCESS_BROWSER_SESSION_LOCK_ROOT,
+        createHash('sha1').update(sessionKey).digest('hex')
+    );
+}
+
+function isCrossProcessPoolLockStale(lockPath: string): boolean {
+    try {
+        const stat = statSync(lockPath);
+        return Date.now() - stat.mtimeMs >= CROSS_PROCESS_POOL_LOCK_STALE_MS;
+    } catch {
+        return false;
+    }
+}
+
+function isCrossProcessBrowserSessionLockStale(lockPath: string): boolean {
+    try {
+        const stat = statSync(lockPath);
+        return Date.now() - stat.mtimeMs >= CROSS_PROCESS_BROWSER_SESSION_LOCK_STALE_MS;
+    } catch {
+        return false;
+    }
+}
+
+async function withCrossProcessPoolLock<T>(poolKey: string, operation: () => Promise<T>): Promise<T> {
+    const lockPath = getCrossProcessPoolLockPath(poolKey);
+    const lockInfoPath = path.join(lockPath, 'owner.json');
+    const startedAt = Date.now();
+
+    while (true) {
+        try {
+            mkdirSync(lockPath);
+            writeFileSync(lockInfoPath, JSON.stringify({
+                pid: process.pid,
+                leaseOwner: currentProcessLeaseOwner,
+                acquiredAt: new Date().toISOString()
+            }));
+            break;
+        } catch (error: any) {
+            if (error?.code !== 'EEXIST') {
+                throw error;
+            }
+
+            if (isCrossProcessPoolLockStale(lockPath)) {
+                rmSync(lockPath, { recursive: true, force: true });
+                continue;
+            }
+
+            if (Date.now() - startedAt >= CROSS_PROCESS_POOL_LOCK_STALE_MS) {
+                throw new Error(`Timed out waiting for cross-process Playwright page-pool lock: ${poolKey}`);
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+    }
+
+    try {
+        return await operation();
+    } finally {
+        rmSync(lockPath, { recursive: true, force: true });
+    }
+}
+
+async function withCrossProcessBrowserSessionLock<T>(sessionKey: string, operation: () => Promise<T>): Promise<T> {
+    const lockPath = getCrossProcessBrowserSessionLockPath(sessionKey);
+    const lockInfoPath = path.join(lockPath, 'owner.json');
+    const startedAt = Date.now();
+
+    while (true) {
+        try {
+            mkdirSync(lockPath);
+            writeFileSync(lockInfoPath, JSON.stringify({
+                pid: process.pid,
+                sessionKey,
+                acquiredAt: new Date().toISOString()
+            }));
+            break;
+        } catch (error: any) {
+            if (error?.code !== 'EEXIST') {
+                throw error;
+            }
+
+            if (isCrossProcessBrowserSessionLockStale(lockPath)) {
+                rmSync(lockPath, { recursive: true, force: true });
+                continue;
+            }
+
+            if (Date.now() - startedAt >= CROSS_PROCESS_BROWSER_SESSION_LOCK_STALE_MS) {
+                throw new Error(`Timed out waiting for cross-process Playwright browser-session lock: ${sessionKey}`);
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+    }
+
+    try {
+        return await operation();
+    } finally {
+        rmSync(lockPath, { recursive: true, force: true });
+    }
 }
 
 function isPageClosed(page: any): boolean {
@@ -143,7 +329,153 @@ function isPageClosed(page: any): boolean {
     }
 }
 
-function syncPoolWithExistingContextPages(pool: BrowserPlaywrightPagePool, context: any): void {
+function parseOpenWebSearchPageState(windowName: string, poolKey: string): OpenWebSearchPageState | null {
+    if (!windowName.startsWith(OPEN_WEBSEARCH_PAGE_STATE_PREFIX)) {
+        return windowName === `__open_websearch_pool__:${poolKey}`
+            ? {
+                poolKey,
+                leaseOwner: null,
+                leaseTimestamp: null
+            }
+            : null;
+    }
+
+    const encoded = windowName.slice(OPEN_WEBSEARCH_PAGE_STATE_PREFIX.length);
+    try {
+        const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as Partial<OpenWebSearchPageState>;
+        if (typeof parsed.poolKey !== 'string' || parsed.poolKey.length === 0) {
+            return null;
+        }
+
+        return {
+            poolKey: parsed.poolKey,
+            leaseOwner: typeof parsed.leaseOwner === 'string' && parsed.leaseOwner.length > 0 ? parsed.leaseOwner : null,
+            leaseTimestamp: typeof parsed.leaseTimestamp === 'number' && Number.isFinite(parsed.leaseTimestamp) ? parsed.leaseTimestamp : null
+        };
+    } catch {
+        return null;
+    }
+}
+
+function serializeOpenWebSearchPageState(state: OpenWebSearchPageState): string {
+    const encoded = Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
+    return `${OPEN_WEBSEARCH_PAGE_STATE_PREFIX}${encoded}`;
+}
+
+async function getOpenWebSearchPageState(page: any, poolKey: string): Promise<OpenWebSearchPageState | null> {
+    const windowName = await page.evaluate(() => window.name).catch(() => '');
+    return typeof windowName === 'string' ? parseOpenWebSearchPageState(windowName, poolKey) : null;
+}
+
+function isActivePageLease(state: OpenWebSearchPageState | null): boolean {
+    return !!(state?.leaseOwner && state.leaseTimestamp && Date.now() - state.leaseTimestamp < PAGE_LEASE_STALE_MS);
+}
+
+async function updateOpenWebSearchPageState(
+    page: any,
+    poolKey: string,
+    updater: (current: OpenWebSearchPageState | null) => OpenWebSearchPageState | null
+): Promise<OpenWebSearchPageState | null> {
+    const currentState = await getOpenWebSearchPageState(page, poolKey);
+    const nextState = updater(currentState);
+    if (!nextState) {
+        return currentState;
+    }
+
+    const nextWindowName = serializeOpenWebSearchPageState(nextState);
+    await page.evaluate((windowName: string) => {
+        window.name = windowName;
+    }, nextWindowName).catch(() => undefined);
+    return nextState;
+}
+
+async function tryAcquirePlaywrightPageLease(page: any, poolKey: string): Promise<boolean> {
+    const currentState = await getOpenWebSearchPageState(page, poolKey);
+    if (currentState?.poolKey && currentState.poolKey !== poolKey && isActivePageLease(currentState)) {
+        return false;
+    }
+
+    if (isActivePageLease(currentState) && currentState?.leaseOwner !== currentProcessLeaseOwner) {
+        return false;
+    }
+
+    const nextState = await updateOpenWebSearchPageState(page, poolKey, (current) => ({
+        poolKey,
+        leaseOwner: currentProcessLeaseOwner,
+        leaseTimestamp: Date.now()
+    }));
+
+    return nextState?.leaseOwner === currentProcessLeaseOwner;
+}
+
+async function releasePlaywrightPageLease(page: any, poolKey: string): Promise<void> {
+    await updateOpenWebSearchPageState(page, poolKey, (current) => {
+        if (!current || current.poolKey !== poolKey || current.leaseOwner !== currentProcessLeaseOwner) {
+            return current;
+        }
+
+        return {
+            poolKey,
+            leaseOwner: null,
+            leaseTimestamp: null
+        };
+    });
+}
+
+type ExistingContextPageWindowBounds = {
+    left?: number;
+    top?: number;
+    width?: number;
+    height?: number;
+    windowState?: string;
+};
+
+async function getExistingContextPageWindowBounds(page: any): Promise<{ bounds: ExistingContextPageWindowBounds | null; unavailable: boolean }> {
+    try {
+        const context = typeof page?.context === 'function' ? page.context() : null;
+        if (!context || typeof context.newCDPSession !== 'function') {
+            return { bounds: null, unavailable: false };
+        }
+
+        const session = await context.newCDPSession(page);
+        const windowForTarget = await session.send('Browser.getWindowForTarget');
+        const boundsResult = await session.send('Browser.getWindowBounds', { windowId: windowForTarget.windowId });
+        return {
+            bounds: boundsResult?.bounds ?? null,
+            unavailable: false
+        };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+            bounds: null,
+            unavailable: /Browser\.getWindowForTarget\): Browser window not found/i.test(message)
+        };
+    }
+}
+
+async function isPopupLikePlaywrightPage(page: any): Promise<boolean> {
+    const { unavailable } = await getExistingContextPageWindowBounds(page);
+    if (unavailable) {
+        // 如果 CDP 已经拿不到这个 page 对应的 Browser window，就把它视为不安全页（可能是浏览器弹出窗口），不参与复用。
+        return true;
+    }
+    return false;
+}
+
+async function isReusableExistingContextPage(page: any, poolKey: string): Promise<boolean> {
+    const state = await getOpenWebSearchPageState(page, poolKey);
+    if (state?.poolKey && state.poolKey !== poolKey && isActivePageLease(state)) {
+        return false;
+    }
+
+    if (await isPopupLikePlaywrightPage(page)) {
+        return false;
+    }
+
+    return true;
+}
+
+async function syncPoolWithReusableExistingContextPages(pool: BrowserPlaywrightPagePool, context: any): Promise<void> {
     if (typeof context?.pages !== 'function') {
         return;
     }
@@ -154,10 +486,21 @@ function syncPoolWithExistingContextPages(pool: BrowserPlaywrightPagePool, conte
     }
 
     for (const page of existingPages) {
+        if (isPageClosed(page) || pool.entries.some((entry) => entry.page === page)) {
+            continue;
+        }
+
+        if (!await isReusableExistingContextPage(page, pool.poolKey)) {
+            continue;
+        }
+
         if (pool.entries.some((entry) => entry.page === page)) {
             continue;
         }
 
+        // 收编所有当前可复用的现有标签页；当前唯一的排除规则是
+        // 该 page 在 CDP 层已经找不到对应 Browser window。
+        // await 之后仍要再次检查去重，否则并发扫描时仍可能把同一真实 page 重复塞进池子。
         pool.entries.push({
             context,
             page,
@@ -172,7 +515,8 @@ async function createPooledPlaywrightPageEntry(browser: any, pool: BrowserPlaywr
         const contexts = browser.contexts();
         if (Array.isArray(contexts) && contexts.length > 0 && typeof contexts[0].newPage === 'function') {
             const context = contexts[0];
-            syncPoolWithExistingContextPages(pool, context);
+            await syncPoolWithReusableExistingContextPages(pool, context);
+
             const page = await context.newPage();
             const entry: PooledPlaywrightPageEntry = {
                 context,
@@ -216,35 +560,100 @@ async function createPooledPlaywrightPageEntry(browser: any, pool: BrowserPlaywr
     throw new Error('Connected Playwright browser does not support creating a pooled page');
 }
 
-export async function acquirePooledPlaywrightPage(
+function isRecoverableLocalBrowserSessionError(error: unknown): boolean {
+    if (!(error instanceof Error)) {
+        return false;
+    }
+
+    const message = error.message.toLowerCase();
+    return message.includes('browser has been closed')
+        || message.includes('target page, context or browser has been closed')
+        || message.includes('connection closed')
+        || message.includes('browser closed')
+        || message.includes('not connected');
+}
+
+async function recoverLocalBrowserSessionBrowser(browser: any): Promise<any | null> {
+    if (config.playwrightWsEndpoint || config.playwrightCdpEndpoint) {
+        return null;
+    }
+
+    if (!cachedLocalBrowserSession || cachedLocalBrowserSession.browser !== browser || !cachedLocalBrowserSessionOptions) {
+        return null;
+    }
+
+    const playwright = await loadPlaywrightClient();
+    if (!playwright) {
+        return null;
+    }
+
+    cachedLocalBrowserSession = null;
+    cachedLocalBrowserSessionKey = null;
+
+    const recoveredSession = await getOrCreateLocalBrowserSession(
+        playwright,
+        cachedLocalBrowserSessionOptions.headless,
+        cachedLocalBrowserSessionOptions.launchArgs,
+        cachedLocalBrowserSessionOptions.options
+    );
+    return recoveredSession.browser;
+}
+
+async function acquirePooledPlaywrightPageOnce(
     browser: any,
     options?: AcquirePlaywrightPageOptions
 ): Promise<PooledPlaywrightPageSession> {
     const pool = getBrowserPlaywrightPagePool(browser, options);
 
-    if (pool.preferExistingContext && typeof browser.contexts === 'function') {
-        const contexts = browser.contexts();
-        if (Array.isArray(contexts) && contexts.length > 0) {
-            syncPoolWithExistingContextPages(pool, contexts[0]);
+    const entry = await withPoolAcquireLock(pool, async () => withCrossProcessPoolLock(pool.poolKey, async () => {
+        if (pool.preferExistingContext && typeof browser.contexts === 'function') {
+            const contexts = browser.contexts();
+            if (Array.isArray(contexts) && contexts.length > 0) {
+                await syncPoolWithReusableExistingContextPages(pool, contexts[0]);
+            }
         }
-    }
 
-    pool.entries = pool.entries.filter((entry) => !isPageClosed(entry.page));
+        pool.entries = pool.entries.filter((candidate) => !isPageClosed(candidate.page));
 
-    let entry = pool.entries.find((candidate) => !candidate.busy) ?? null;
-    if (!entry) {
-        entry = await createPooledPlaywrightPageEntry(browser, pool);
-    }
+        let candidate: PooledPlaywrightPageEntry | null = null;
+        for (const poolEntry of pool.entries) {
+            if (poolEntry.busy) {
+                continue;
+            }
 
-    entry.busy = true;
+            if (await tryAcquirePlaywrightPageLease(poolEntry.page, pool.poolKey)) {
+                candidate = poolEntry;
+                break;
+            }
+        }
+
+        if (!candidate) {
+            candidate = await createPooledPlaywrightPageEntry(browser, pool);
+            const acquired = await tryAcquirePlaywrightPageLease(candidate.page, pool.poolKey);
+            if (!acquired) {
+                throw new Error(`Failed to acquire lease for newly created Playwright page in pool ${pool.poolKey}`);
+            }
+        }
+
+        candidate.busy = true;
+        return candidate;
+    }));
 
     if (!entry.prepared) {
-        if (pool.preparePage) {
-            // 把页池分配与页面初始化统一到 Playwright 公共层。
-            // 上层只需要提供各自的页面初始化逻辑，具体如何复用空闲页与按需扩容由这里统一负责。
-            await pool.preparePage(entry.page);
+        try {
+            if (pool.preparePage) {
+                await pool.preparePage(entry.page);
+            }
+            entry.prepared = true;
+        } catch (error) {
+            if (isPageClosed(entry.page)) {
+                pool.entries = pool.entries.filter((candidate) => candidate !== entry);
+            } else {
+                await releasePlaywrightPageLease(entry.page, pool.poolKey);
+                entry.busy = false;
+            }
+            throw error;
         }
-        entry.prepared = true;
     }
 
     return {
@@ -256,9 +665,30 @@ export async function acquirePooledPlaywrightPage(
                 return;
             }
 
+            await releasePlaywrightPageLease(entry.page, pool.poolKey);
             entry.busy = false;
         }
     };
+}
+
+export async function acquirePooledPlaywrightPage(
+    browser: any,
+    options?: AcquirePlaywrightPageOptions
+): Promise<PooledPlaywrightPageSession> {
+    try {
+        return await acquirePooledPlaywrightPageOnce(browser, options);
+    } catch (error) {
+        if (!isRecoverableLocalBrowserSessionError(error)) {
+            throw error;
+        }
+
+        const recoveredBrowser = await recoverLocalBrowserSessionBrowser(browser);
+        if (!recoveredBrowser) {
+            throw error;
+        }
+
+        return acquirePooledPlaywrightPageOnce(recoveredBrowser, options);
+    }
 }
 
 function buildPlaywrightProxy(): { server: string; username?: string; password?: string } | undefined {
@@ -352,21 +782,79 @@ function findFreePort(): Promise<number> {
 }
 
 function buildLocalSessionKey(headless: boolean, launchArgs: string[], options?: OpenPlaywrightBrowserOptions): string {
+    const proxy = buildPlaywrightProxy();
+
     return JSON.stringify({
         headless,
         hideWindow: options?.hideWindow === true,
         executablePath: config.playwrightExecutablePath || '',
-        proxy: getProxyUrl() || '',
+        // 这里仅保留不含凭据的代理服务器标识和其哈希，用来区分会话，不把敏感信息写进 %TEMP%。
+        proxyServer: proxy?.server || '',
+        proxyFingerprint: proxy?.server
+            ? createHash('sha256').update(proxy.server).digest('hex')
+            : '',
         launchArgs
     });
 }
 
-function buildLocalBrowserProcessArgs(port: number, tempDir: string, launchArgs: string[]): string[] {
+function buildLocalBrowserCompatibilityKey(launchArgs: string[]): string {
+    const proxy = buildPlaywrightProxy();
+    const normalizedLaunchArgs = launchArgs.filter((arg) => ![
+        '--window-position=-32000,-32000',
+        '--window-size=1,1',
+        '--disable-extensions',
+        '--no-default-browser-check',
+        '--headless=new',
+        '--headless'
+    ].includes(arg));
+
+    return JSON.stringify({
+        executablePath: config.playwrightExecutablePath || '',
+        proxyServer: proxy?.server || '',
+        proxyFingerprint: proxy?.server
+            ? createHash('sha256').update(proxy.server).digest('hex')
+            : '',
+        launchArgs: normalizedLaunchArgs.sort()
+    });
+}
+
+function isCompatibleLocalBrowserSessionMode(
+    requestedMode: LocalBrowserSessionMode,
+    candidateMode: LocalBrowserSessionMode
+): boolean {
+    if (requestedMode === 'headless') {
+        return candidateMode === 'headless' || candidateMode === 'hidden-headed';
+    }
+
+    return requestedMode === candidateMode;
+}
+
+function getLocalBrowserSessionModeReuseScore(
+    requestedMode: LocalBrowserSessionMode,
+    candidateMode: LocalBrowserSessionMode
+): number {
+    if (requestedMode === candidateMode) {
+        return 2;
+    }
+
+    if (requestedMode === 'headless' && candidateMode === 'hidden-headed') {
+        return 1;
+    }
+
+    return 0;
+}
+
+function buildLocalBrowserProcessArgs(port: number, tempDir: string, launchArgs: string[], headless = false): string[] {
     const args = [
         `--remote-debugging-port=${port}`,
         `--user-data-dir=${tempDir}`,
         ...launchArgs
     ];
+
+    if (headless) {
+        args.push('--headless=new');
+    }
+
     const proxy = buildPlaywrightProxy();
 
     if (proxy?.server) {
@@ -484,7 +972,36 @@ function writeLocalBrowserSessionMetadata(metadata: LocalBrowserSessionMetadata)
 
 function readLocalBrowserSessionMetadata(tempDir: string): LocalBrowserSessionMetadata | null {
     try {
-        return JSON.parse(readFileSync(getLocalBrowserSessionMetadataPath(tempDir), 'utf8')) as LocalBrowserSessionMetadata;
+        const parsed = JSON.parse(readFileSync(getLocalBrowserSessionMetadataPath(tempDir), 'utf8')) as Partial<LocalBrowserSessionMetadata>;
+        const sessionMode = parsed.sessionMode
+            ?? (parsed.hideWindow
+                ? 'hidden-headed'
+                : parsed.strictCleanup
+                    ? 'headless'
+                    : 'headed');
+        const compatibilityKey = parsed.compatibilityKey ?? JSON.stringify({
+            executablePath: parsed.executablePath || '',
+            proxyServer: '',
+            proxyFingerprint: '',
+            launchArgs: []
+        });
+
+        return {
+            ownerPid: parsed.ownerPid ?? 0,
+            browserPid: parsed.browserPid,
+            debugPort: parsed.debugPort,
+            tempDir: parsed.tempDir ?? tempDir,
+            executablePath: parsed.executablePath ?? '',
+            sessionKey: parsed.sessionKey ?? '',
+            compatibilityKey,
+            sessionMode,
+            hideWindow: parsed.hideWindow ?? sessionMode === 'hidden-headed',
+            strictCleanup: parsed.strictCleanup ?? sessionMode === 'headless',
+            clientPids: Array.isArray(parsed.clientPids)
+                ? parsed.clientPids.filter((pid): pid is number => Number.isInteger(pid) && pid > 0)
+                : [],
+            createdAt: parsed.createdAt ?? new Date(0).toISOString()
+        };
     } catch {
         return null;
     }
@@ -501,6 +1018,29 @@ function processExists(pid: number): boolean {
     } catch {
         return false;
     }
+}
+
+function normalizeActiveClientPids(clientPids: number[]): number[] {
+    return [...new Set(clientPids.filter((pid) => processExists(pid)))];
+}
+
+function registerLocalBrowserSessionClient(metadata: LocalBrowserSessionMetadata, pid = process.pid): LocalBrowserSessionMetadata {
+    const normalizedMetadata: LocalBrowserSessionMetadata = {
+        ...metadata,
+        clientPids: normalizeActiveClientPids([...metadata.clientPids, pid]),
+        ownerPid: pid
+    };
+    writeLocalBrowserSessionMetadata(normalizedMetadata);
+    return normalizedMetadata;
+}
+
+function unregisterLocalBrowserSessionClient(metadata: LocalBrowserSessionMetadata, pid = process.pid): LocalBrowserSessionMetadata {
+    const normalizedMetadata: LocalBrowserSessionMetadata = {
+        ...metadata,
+        clientPids: normalizeActiveClientPids(metadata.clientPids.filter((clientPid) => clientPid !== pid))
+    };
+    writeLocalBrowserSessionMetadata(normalizedMetadata);
+    return normalizedMetadata;
 }
 
 function getProcessCommandLine(pid: number): string | null {
@@ -543,11 +1083,52 @@ function processMatchesLocalBrowserSession(pid: number, tempDir: string): boolea
         && commandLine.includes('--remote-debugging-port=');
 }
 
-function updateLocalBrowserSessionOwner(metadata: LocalBrowserSessionMetadata): void {
-    writeLocalBrowserSessionMetadata({
+function quoteWindowsCommandLineArg(arg: string): string {
+    if (arg.length === 0) {
+        return '""';
+    }
+
+    if (!/[\s"]/u.test(arg)) {
+        return arg;
+    }
+
+    let escaped = '"';
+    let backslashCount = 0;
+
+    for (const char of arg) {
+        if (char === '\\') {
+            backslashCount += 1;
+            continue;
+        }
+
+        if (char === '"') {
+            escaped += '\\'.repeat(backslashCount * 2 + 1);
+            escaped += '"';
+            backslashCount = 0;
+            continue;
+        }
+
+        if (backslashCount > 0) {
+            escaped += '\\'.repeat(backslashCount);
+            backslashCount = 0;
+        }
+
+        escaped += char;
+    }
+
+    if (backslashCount > 0) {
+        escaped += '\\'.repeat(backslashCount * 2);
+    }
+
+    escaped += '"';
+    return escaped;
+}
+
+function updateLocalBrowserSessionOwner(metadata: LocalBrowserSessionMetadata, pid = process.pid): LocalBrowserSessionMetadata {
+    return registerLocalBrowserSessionClient({
         ...metadata,
-        ownerPid: process.pid
-    });
+        ownerPid: pid
+    }, pid);
 }
 
 function extractTempDirFromCommandLine(commandLine: string): string | null {
@@ -580,7 +1161,7 @@ function cleanupLegacyOrphanLocalBrowserProcesses(): void {
                 '-NoProfile',
                 '-NonInteractive',
                 '-Command',
-                "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'msedge.exe' -and $_.CommandLine -match 'mcp-search-' -and $_.CommandLine -match '--remote-debugging-port=' -and $_.CommandLine -notmatch '--type=' } | Select-Object ProcessId, ParentProcessId, CreationDate, CommandLine | ConvertTo-Json -Compress"
+                "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'msedge.exe' -or $_.Name -eq 'chrome.exe') -and $_.CommandLine -match 'mcp-search-' -and $_.CommandLine -match '--remote-debugging-port=' -and $_.CommandLine -notmatch '--type=' } | Select-Object ProcessId, ParentProcessId, CreationDate, CommandLine | ConvertTo-Json -Compress"
             ],
             { encoding: 'utf8', windowsHide: true, timeout: 5000 }
         ).trim();
@@ -642,26 +1223,20 @@ function cleanupStaleLocalBrowserSessions(): void {
                 continue;
             }
 
-            if (metadata.ownerPid === process.pid) {
+            const normalizedMetadata = registerLocalBrowserSessionClient({
+                ...metadata,
+                clientPids: metadata.clientPids.filter((pid) => pid !== process.pid)
+            }, metadata.ownerPid);
+
+            const browserIsAlive = normalizedMetadata.browserPid !== undefined
+                && processMatchesLocalBrowserSession(normalizedMetadata.browserPid, normalizedMetadata.tempDir);
+
+            if (browserIsAlive) {
                 continue;
             }
 
-            const browserIsAlive = metadata.browserPid !== undefined
-                && processMatchesLocalBrowserSession(metadata.browserPid, metadata.tempDir);
-
-            if (browserIsAlive && !metadata.strictCleanup) {
-                continue;
-            }
-
-            if (browserIsAlive && metadata.strictCleanup) {
-                unregisterLocalBrowserSession(metadata.sessionKey, metadata.tempDir);
-                createForceKill(metadata.browserPid, metadata.tempDir)();
-                console.error(`🧹 Cleaned stale Playwright browser session from PID ${metadata.browserPid}`);
-                continue;
-            }
-
-            unregisterLocalBrowserSession(metadata.sessionKey, metadata.tempDir);
-            rmSync(metadata.tempDir, { recursive: true, force: true });
+            unregisterLocalBrowserSession(normalizedMetadata.sessionKey, normalizedMetadata.tempDir);
+            rmSync(normalizedMetadata.tempDir, { recursive: true, force: true });
         } catch {
             unregisterLocalBrowserSessionByTempDir(tempDir);
             try {
@@ -782,88 +1357,97 @@ async function connectToLocalDebugBrowser(playwright: PlaywrightModule, port: nu
 
 async function tryReusePersistedLocalBrowserSession(
     playwright: PlaywrightModule,
-    sessionKey: string,
-    strictCleanup: boolean
+    requestedMode: LocalBrowserSessionMode,
+    compatibilityKey: string
 ): Promise<LocalBrowserSession | null> {
-    if (strictCleanup) {
-        return null;
-    }
-
-    // 通过 %TEMP% 根目录下的索引文件，按 sessionKey 直接定位上次会话的 tempDir。
-    // 如果没有索引，就视为没有可复用旧会话，直接由上层创建新的浏览器会话。
-    const registeredTempDir = getRegisteredLocalBrowserSessionTempDir(sessionKey);
-    if (!registeredTempDir) {
-        return null;
-    }
-
-    const entries = [registeredTempDir];
+    const entries = listRegisteredLocalBrowserSessionTempDirs();
+    let bestMatch: { metadata: LocalBrowserSessionMetadata; score: number } | null = null;
 
     for (const tempDir of entries) {
         const metadata = readLocalBrowserSessionMetadata(tempDir);
-        if (!metadata || metadata.strictCleanup || metadata.sessionKey !== sessionKey) {
+        if (!metadata || metadata.compatibilityKey !== compatibilityKey) {
             continue;
         }
 
-        if (!metadata.debugPort || !metadata.browserPid || !processMatchesLocalBrowserSession(metadata.browserPid, metadata.tempDir)) {
-            unregisterLocalBrowserSession(metadata.sessionKey, metadata.tempDir);
+        if (!isCompatibleLocalBrowserSessionMode(requestedMode, metadata.sessionMode)) {
             continue;
         }
 
-        try {
-            const browser = await connectToLocalDebugBrowser(playwright, metadata.debugPort);
-            updateLocalBrowserSessionOwner(metadata);
-            const forceKill = createForceKill(metadata.browserPid, metadata.tempDir, browser);
-            const session: LocalBrowserSession = {
-                browser,
-                sessionKey,
-                browserPid: metadata.browserPid,
-                debugPort: metadata.debugPort,
-                tempDir: metadata.tempDir,
-                strictCleanup: false,
-                closeBrowser: async () => {
-                    await closeLocalBrowserSession(session);
-                },
-                forceKill
-            };
-            console.error(`🧭 Reused existing Playwright browser session from PID ${metadata.browserPid}`);
-            return session;
-        } catch {
-            unregisterLocalBrowserSession(metadata.sessionKey, metadata.tempDir);
-            // Ignore failed reuse attempts and continue scanning.
+        const score = getLocalBrowserSessionModeReuseScore(requestedMode, metadata.sessionMode);
+        if (!bestMatch || score > bestMatch.score) {
+            bestMatch = { metadata, score };
         }
+    }
+
+    if (!bestMatch) {
+        return null;
+    }
+
+    const metadata = bestMatch.metadata;
+
+    if (!metadata.debugPort || !metadata.browserPid || !processMatchesLocalBrowserSession(metadata.browserPid, metadata.tempDir)) {
+        unregisterLocalBrowserSession(metadata.sessionKey, metadata.tempDir);
+        return null;
+    }
+
+    try {
+        const browser = await connectToLocalDebugBrowser(playwright, metadata.debugPort);
+        const updatedMetadata = updateLocalBrowserSessionOwner(metadata);
+        const forceKill = createForceKill(metadata.browserPid, metadata.tempDir, browser);
+        const session: LocalBrowserSession = {
+            browser,
+            sessionKey: updatedMetadata.sessionKey,
+            sessionMode: updatedMetadata.sessionMode,
+            browserPid: updatedMetadata.browserPid,
+            debugPort: updatedMetadata.debugPort,
+            tempDir: updatedMetadata.tempDir,
+            closeBrowser: async () => {
+                await closeLocalBrowserSession(session);
+            },
+            forceKill
+        };
+        console.error(`🧭 Reused existing Playwright browser session from PID ${metadata.browserPid}`);
+        return session;
+    } catch {
+        unregisterLocalBrowserSession(metadata.sessionKey, metadata.tempDir);
     }
 
     return null;
 }
 
 async function closeLocalBrowserSession(session: LocalBrowserSession): Promise<void> {
-    if (session.browserPid && session.strictCleanup) {
-        try {
-            await Promise.race([
-                session.browser.close(),
-                new Promise((resolve) => {
-                    const timer = setTimeout(resolve, 3000);
-                    if (typeof timer === 'object' && 'unref' in timer) {
-                        (timer as NodeJS.Timeout).unref();
-                    }
-                })
-            ]);
-        } catch {
-            // Ignore connection close errors for externally spawned browsers.
+    if (session.browserPid && session.tempDir) {
+        const metadata = readLocalBrowserSessionMetadata(session.tempDir);
+        const updatedMetadata = metadata
+            ? unregisterLocalBrowserSessionClient(metadata)
+            : null;
+        const hasOtherClients = (updatedMetadata?.clientPids.length ?? 0) > 0;
+
+        if (session.sessionMode !== 'headed' && !hasOtherClients) {
+            try {
+                await Promise.race([
+                    session.browser.close(),
+                    new Promise((resolve) => {
+                        const timer = setTimeout(resolve, 3000);
+                        if (typeof timer === 'object' && 'unref' in timer) {
+                            (timer as NodeJS.Timeout).unref();
+                        }
+                    })
+                ]);
+            } catch {
+                // Ignore connection close errors for externally spawned browsers.
+            }
+
+            // 修复无头/隐藏头模式退出时遗留后台浏览器的问题：
+            // 只有在当前进程释放后确认没有其它 Node 进程仍登记复用时，才真正结束外部浏览器根进程。
+            session.forceKill();
+            return;
         }
 
-        // 修复 daemon 关闭后 Edge 进程残留的问题：
-        // 对 connectOverCDP 接入的外部浏览器，仅关闭 Playwright 连接并不会结束根进程。
-        // 这里显式回收由当前进程创建的浏览器 PID。
-        session.forceKill();
-        return;
-    }
-
-    if (session.browserPid) {
         try {
             await session.browser.close().catch(() => undefined);
         } catch {
-            // Ignore close errors for reusable headed browsers.
+            // Ignore close errors for reusable externally spawned browsers.
         }
         return;
     }
@@ -939,9 +1523,6 @@ function registerLocalBrowserCleanup(): void {
     cleanupRegistered = true;
     process.once('exit', () => {
         if (cachedLocalBrowserSession) {
-            if (cachedLocalBrowserSession.strictCleanup) {
-                cachedLocalBrowserSession.forceKill();
-            }
             cachedLocalBrowserSession = null;
             cachedLocalBrowserSessionKey = null;
         }
@@ -973,7 +1554,10 @@ async function launchHiddenDesktopBrowser(playwright: PlaywrightModule, sessionK
     const tempDir = mkdtempSync(path.join(tmpdir(), 'mcp-search-'));
     const port = await findFreePort();
     const args = buildLocalBrowserProcessArgs(port, tempDir, launchArgs);
-    const cmdLine = `"${browserPath}" ${args.join(' ')}`;
+    const compatibilityKey = buildLocalBrowserCompatibilityKey(launchArgs);
+    // 解决隐藏桌面启动命令在参数含空格时的解析问题。
+    // 这里通过逐项转义/加引号构造传给 CreateProcessW 的完整命令行，确保 user-data-dir 等参数不会被拆错。
+    const cmdLine = [quoteWindowsCommandLineArg(browserPath), ...args.map((arg) => quoteWindowsCommandLineArg(arg))].join(' ');
 
     let browserPid: number | undefined;
     if (process.platform === 'win32') {
@@ -993,8 +1577,11 @@ async function launchHiddenDesktopBrowser(playwright: PlaywrightModule, sessionK
             tempDir,
             executablePath: browserPath,
             sessionKey,
+            compatibilityKey,
+            sessionMode: 'hidden-headed',
             hideWindow: true,
-            strictCleanup: true,
+            strictCleanup: false,
+            clientPids: [process.pid],
             createdAt: new Date().toISOString()
         });
         console.error(`🧭 Playwright browser started on hidden desktop "${desktopName}" (PID: ${browserPid})`);
@@ -1013,8 +1600,11 @@ async function launchHiddenDesktopBrowser(playwright: PlaywrightModule, sessionK
             tempDir,
             executablePath: browserPath,
             sessionKey,
+            compatibilityKey,
+            sessionMode: 'hidden-headed',
             hideWindow: true,
-            strictCleanup: true,
+            strictCleanup: false,
+            clientPids: [process.pid],
             createdAt: new Date().toISOString()
         });
     }
@@ -1025,10 +1615,10 @@ async function launchHiddenDesktopBrowser(playwright: PlaywrightModule, sessionK
         const session: LocalBrowserSession = {
             browser,
             sessionKey,
+            sessionMode: 'hidden-headed',
             browserPid,
             debugPort: port,
             tempDir,
-            strictCleanup: true,
             closeBrowser: async () => {
                 await closeLocalBrowserSession(session);
             },
@@ -1042,11 +1632,13 @@ async function launchHiddenDesktopBrowser(playwright: PlaywrightModule, sessionK
 }
 
 async function launchStandardLocalBrowser(playwright: PlaywrightModule, sessionKey: string, headless: boolean, launchArgs: string[]): Promise<LocalBrowserSession> {
-    if (process.platform === 'win32' && !headless) {
+    if (process.platform === 'win32') {
         const browserPath = getLocalBrowserExecutablePath();
         const tempDir = mkdtempSync(path.join(tmpdir(), 'mcp-search-'));
         const port = await findFreePort();
-        const args = buildLocalBrowserProcessArgs(port, tempDir, launchArgs);
+        const args = buildLocalBrowserProcessArgs(port, tempDir, launchArgs, headless);
+        const sessionMode: LocalBrowserSessionMode = headless ? 'headless' : 'headed';
+        const compatibilityKey = buildLocalBrowserCompatibilityKey(launchArgs);
         const child = spawn(browserPath, args, {
             stdio: 'ignore',
             detached: true
@@ -1060,8 +1652,11 @@ async function launchStandardLocalBrowser(playwright: PlaywrightModule, sessionK
             tempDir,
             executablePath: browserPath,
             sessionKey,
+            compatibilityKey,
+            sessionMode,
             hideWindow: false,
-            strictCleanup: false,
+            strictCleanup: sessionMode === 'headless',
+            clientPids: [process.pid],
             createdAt: new Date().toISOString()
         });
 
@@ -1071,10 +1666,10 @@ async function launchStandardLocalBrowser(playwright: PlaywrightModule, sessionK
             const session: LocalBrowserSession = {
                 browser,
                 sessionKey,
+                sessionMode,
                 browserPid: child.pid,
                 debugPort: port,
                 tempDir,
-                strictCleanup: false,
                 closeBrowser: async () => {
                     await closeLocalBrowserSession(session);
                 },
@@ -1103,7 +1698,7 @@ async function launchStandardLocalBrowser(playwright: PlaywrightModule, sessionK
     const session: LocalBrowserSession = {
         browser,
         sessionKey,
-        strictCleanup: true,
+        sessionMode: headless ? 'headless' : 'headed',
         closeBrowser: async () => {
             await closeLocalBrowserSession(session);
         },
@@ -1128,20 +1723,17 @@ async function destroyCachedLocalBrowserSession(): Promise<void> {
 
     cachedLocalBrowserSession = null;
     cachedLocalBrowserSessionKey = null;
+    cachedLocalBrowserSessionOptions = null;
 }
 
 export async function shutdownLocalPlaywrightBrowserSessions(): Promise<void> {
-    if (cachedLocalBrowserSession?.strictCleanup) {
-        await destroyCachedLocalBrowserSession();
-        return;
-    }
-
     if (cachedLocalBrowserSession) {
         try {
-            await cachedLocalBrowserSession.browser.close().catch(() => undefined);
+            await closeLocalBrowserSession(cachedLocalBrowserSession);
         } finally {
             cachedLocalBrowserSession = null;
             cachedLocalBrowserSessionKey = null;
+            cachedLocalBrowserSessionOptions = null;
         }
     }
 }
@@ -1153,18 +1745,22 @@ async function getOrCreateLocalBrowserSession(
     options?: OpenPlaywrightBrowserOptions
 ): Promise<LocalBrowserSession> {
     const sessionKey = buildLocalSessionKey(headless, launchArgs, options);
-    const strictCleanup = shouldUseStrictLocalBrowserCleanup(headless, options);
+    const sessionMode = getLocalBrowserSessionMode(headless, options);
+    const compatibilityKey = buildLocalBrowserCompatibilityKey(launchArgs);
+    cachedLocalBrowserSessionOptions = {
+        headless,
+        launchArgs: [...launchArgs],
+        options: options ? { ...options } : undefined
+    };
 
-    if (strictCleanup) {
-        cleanupStaleLocalBrowserSessions();
-    }
+    // 这里统一清理已经失活的登记会话，但不再误杀仍可跨进程复用的隐藏/无头调试浏览器。
+    cleanupStaleLocalBrowserSessions();
 
     if (cachedLocalBrowserSession && cachedLocalBrowserSessionKey === sessionKey) {
         try {
             await cachedLocalBrowserSession.browser.version();
             return cachedLocalBrowserSession;
         } catch {
-            cachedLocalBrowserSession.forceKill();
             cachedLocalBrowserSession = null;
             cachedLocalBrowserSessionKey = null;
         }
@@ -1180,22 +1776,24 @@ async function getOrCreateLocalBrowserSession(
 
     cachedLocalBrowserSessionKey = sessionKey;
     localBrowserSessionPromise = (async () => {
-        if (!strictCleanup) {
-            const reusedSession = await tryReusePersistedLocalBrowserSession(playwright, sessionKey, strictCleanup);
+        return withCrossProcessBrowserSessionLock(sessionKey, async () => {
+            const reusedSession = await tryReusePersistedLocalBrowserSession(playwright, sessionMode, compatibilityKey);
             if (reusedSession) {
                 cachedLocalBrowserSession = reusedSession;
                 registerLocalBrowserCleanup();
                 return reusedSession;
             }
-        }
 
-        const session = options?.hideWindow
-            ? await launchHiddenDesktopBrowser(playwright, sessionKey, launchArgs)
-            : await launchStandardLocalBrowser(playwright, sessionKey, headless, launchArgs);
-        session.sessionKey = sessionKey;
-        cachedLocalBrowserSession = session;
-        registerLocalBrowserCleanup();
-        return session;
+            // 修复隐藏/无头多进程并发时相互抢建并互相清理浏览器的问题：
+            // 同一个 sessionKey 现在先走跨进程锁，再复用已登记的调试浏览器；只有确认不存在可重连会话时才新建。
+            const session = options?.hideWindow
+                ? await launchHiddenDesktopBrowser(playwright, sessionKey, launchArgs)
+                : await launchStandardLocalBrowser(playwright, sessionKey, headless, launchArgs);
+            session.sessionKey = sessionKey;
+            cachedLocalBrowserSession = session;
+            registerLocalBrowserCleanup();
+            return session;
+        });
     })().finally(() => {
         localBrowserSessionPromise = null;
     });
@@ -1329,7 +1927,9 @@ export async function openPlaywrightBrowser(
     return {
         browser: session.browser,
         close: async () => {
-            // 共享本地浏览器由进程级缓存统一管理，这里不主动关闭，避免每次搜索都重启浏览器。
+            // 不采纳“这里直接关闭浏览器”的审核建议。
+            // openPlaywrightBrowser 在本地模式下返回的是共享浏览器句柄；若在这里真实关闭，会破坏进程内浏览器复用与页池复用。
+            // 共享浏览器的生命周期统一由 shutdownLocalPlaywrightBrowserSessions 管理，这里只释放调用方句柄语义。
             return Promise.resolve();
         }
     };

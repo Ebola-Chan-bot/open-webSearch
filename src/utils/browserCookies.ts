@@ -1,5 +1,5 @@
 import { config, getProxyUrl } from '../config.js';
-import { acquirePooledPlaywrightPage, openPlaywrightBrowser, loadPlaywrightClient } from './playwrightClient.js';
+import { openPlaywrightBrowser, loadPlaywrightClient } from './playwrightClient.js';
 
 const COOKIE_CACHE_TTL_MS = 10 * 60 * 1000;
 const COOKIE_WARMUP_DELAY_MS = 1200;
@@ -56,15 +56,16 @@ export function looksLikeBotChallengePage(html: string): boolean {
 }
 
 async function createCookieCollectionPage(browser: any): Promise<{ page: any; close(): Promise<void> }> {
-    const session = await acquirePooledPlaywrightPage(browser, {
-        poolKey: 'browser-cookie-collection',
-        contextOptions: COOKIE_CONTEXT_OPTIONS,
-        preferExistingContext: false
-    });
+    // 解决 Cookie 采集复用页导致上下文状态串用的问题。
+    // 这里显式为每次采集创建独立 context，确保 cookies/storage/open pages 不会跨调用污染。
+    const context = await browser.newContext(COOKIE_CONTEXT_OPTIONS);
+    const page = await context.newPage();
 
     return {
-        page: session.page,
-        close: session.closePageContext
+        page,
+        close: async () => {
+            await context.close().catch(() => undefined);
+        }
     };
 }
 
