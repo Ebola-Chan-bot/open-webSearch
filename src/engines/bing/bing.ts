@@ -361,8 +361,6 @@ async function waitForBingResultsReady(page: any): Promise<void> {
     await page.waitForSelector('#b_results, .b_algo, #b_content', {
         timeout: timeoutMs
     });
-
-    // 临时关闭额外的结果链接稳定等待，验证它是否导致了误诊或额外副作用。
 }
 
 function normalizeBingQueryForUrl(query: string): string {
@@ -438,46 +436,6 @@ function isBingUrl(url: string): boolean {
     }
 }
 
-async function acceptOneTrustConsent(page: any): Promise<void> {
-    const acceptSelectors = [
-        '#onetrust-accept-btn-handler',
-        '#accept-recommended-btn-handler',
-        'button[aria-label="Accept"]',
-        'button[title="Accept"]'
-    ];
-    const overlaySelectors = [
-        '#onetrust-banner-sdk',
-        '#onetrust-pc-sdk',
-        '.onetrust-pc-dark-filter',
-        '.onetrust-pc-dark-filter.ot-fade-in'
-    ];
-
-    for (const selector of acceptSelectors) {
-        const button = page.locator(selector).first();
-        const isVisible = await button.isVisible().catch(() => false);
-        if (!isVisible) {
-            continue;
-        }
-
-        // 解决 OneTrust 同意弹层拦截点击的问题。
-        // 在真正操作 Bing 搜索框或翻页按钮前，优先点掉可见的 Accept/接受按钮，避免遮罩层继续吞掉点击事件。
-        await button.click({ timeout: 5000 }).catch(() => undefined);
-        await Promise.race([
-            ...overlaySelectors.map((overlaySelector) => page.locator(overlaySelector).first().waitFor({ state: 'hidden', timeout: 5000 }).catch(() => undefined)),
-            page.waitForTimeout(600)
-        ]);
-        return;
-    }
-
-    const localizedAcceptButton = page.getByRole('button', { name: /^(accept|接受|同意)$/i }).first();
-    if (await localizedAcceptButton.isVisible().catch(() => false)) {
-        // 解决 OneTrust 变体只暴露文案按钮时无法自动同意的问题。
-        // 这里用 role+name 兜底，兼容站点按语言切换按钮文本但不暴露稳定 id 的情况。
-        await localizedAcceptButton.click({ timeout: 5000 }).catch(() => undefined);
-        await page.waitForTimeout(600).catch(() => undefined);
-    }
-}
-
 async function openBingAndSearch(page: any, query: string): Promise<void> {
     const canReuseCurrentBingPage = isBingUrl(page.url());
     let searchInput = canReuseCurrentBingPage ? await findBingSearchInput(page) : null;
@@ -498,7 +456,6 @@ async function openBingAndSearch(page: any, query: string): Promise<void> {
         throw new Error('Could not find Bing search input box');
     }
 
-    await acceptOneTrustConsent(page);
     await searchInput.click();
     await waitRandom(page, 180, 420);
     if (typeof searchInput.fill === 'function') {
@@ -527,7 +484,6 @@ async function goToNextResultsPage(page: any): Promise<boolean> {
         }
 
         await waitRandom(page, 400, 900);
-        await acceptOneTrustConsent(page);
         await Promise.all([
             page.waitForLoadState('domcontentloaded', { timeout: config.playwrightNavigationTimeoutMs }).catch(() => undefined),
             nextButton.click()

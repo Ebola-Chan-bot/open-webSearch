@@ -1,5 +1,7 @@
-import { spawn } from 'node:child_process';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
 import { createOpenWebSearchRuntime } from '../runtime/createRuntime.js';
 import { startLocalDaemon } from '../adapters/http/localDaemon.js';
 import { SearchResult } from '../types.js';
@@ -54,6 +56,25 @@ type BrowserTabSnapshot = {
         port: number;
         tabCount: number;
     }>;
+};
+
+type BrowserDebugTarget = {
+    pid: number;
+    port: number;
+};
+
+type LocalBrowserSessionRegistry = {
+    sessions?: Record<string, {
+        tempDir?: string;
+    }>;
+};
+
+type LocalBrowserSessionSnapshot = {
+    tempDir: string;
+    browserPid: number;
+    debugPort: number;
+    sessionMode: string;
+    clientPids: number[];
 };
 
 type CliSearchRun = {
@@ -186,6 +207,9 @@ const queryExpectations = new Map<string, QueryExpectation>([
     }]
 ]);
 
+const LOCAL_BROWSER_SESSION_METADATA_FILE = 'open-websearch-session.json';
+const LOCAL_BROWSER_SESSION_REGISTRY_FILE = 'open-websearch-local-browser-sessions.json';
+
 function assertCondition(condition: unknown, message: string): void {
     if (!condition) {
         throw new Error(message);
@@ -197,6 +221,105 @@ function runPowerShell(command: string): string {
         encoding: 'utf8',
         windowsHide: true
     }).trim();
+}
+
+function processExists(pid: number): boolean {
+    if (!Number.isInteger(pid) || pid <= 0) {
+        return false;
+    }
+
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function readJsonFile<T>(filePath: string): T | null {
+    if (!existsSync(filePath)) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(readFileSync(filePath, 'utf8')) as T;
+    } catch {
+        return null;
+    }
+}
+
+function normalizeClientPids(value: unknown): number[] {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+
+    return [...new Set(value.filter((pid): pid is number => Number.isInteger(pid) && pid > 0 && processExists(pid)))].sort((left, right) => left - right);
+}
+
+function listRegisteredLocalBrowserSessions(): LocalBrowserSessionSnapshot[] {
+    const registryPath = path.join(tmpdir(), LOCAL_BROWSER_SESSION_REGISTRY_FILE);
+    const registry = readJsonFile<LocalBrowserSessionRegistry>(registryPath);
+    const entries = registry?.sessions && typeof registry.sessions === 'object'
+        ? Object.values(registry.sessions)
+        : [];
+    const tempDirs = [...new Set(entries
+        .map((entry) => typeof entry?.tempDir === 'string' ? entry.tempDir : '')
+        .filter((tempDir) => tempDir.length > 0))];
+
+    return tempDirs
+        .map((tempDir) => {
+            const metadataPath = path.join(tempDir, LOCAL_BROWSER_SESSION_METADATA_FILE);
+            const metadata = readJsonFile<Record<string, unknown>>(metadataPath);
+            if (!metadata) {
+                return null;
+            }
+
+            const rawBrowserPid = metadata.browserPid;
+            if (typeof rawBrowserPid !== 'number' || !Number.isInteger(rawBrowserPid) || rawBrowserPid <= 0) {
+                return null;
+            }
+
+            const rawDebugPort = metadata.debugPort;
+            if (typeof rawDebugPort !== 'number' || !Number.isInteger(rawDebugPort) || rawDebugPort <= 0) {
+                return null;
+            }
+
+            const browserPid = rawBrowserPid;
+            const debugPort = rawDebugPort;
+
+            const sessionMode = typeof metadata.sessionMode === 'string'
+                ? metadata.sessionMode
+                : metadata.hideWindow === true
+                    ? 'hidden-headed'
+                    : metadata.strictCleanup === true
+                        ? 'headless'
+                        : 'headed';
+
+            return {
+                tempDir,
+                browserPid,
+                debugPort,
+                sessionMode,
+                clientPids: normalizeClientPids(metadata.clientPids)
+            } satisfies LocalBrowserSessionSnapshot;
+        })
+        .filter((session): session is LocalBrowserSessionSnapshot => session !== null)
+        .sort((left, right) => left.browserPid - right.browserPid);
+}
+
+function listHiddenSessionSnapshots(): LocalBrowserSessionSnapshot[] {
+    return listRegisteredLocalBrowserSessions()
+        .filter((session) => session.sessionMode === 'hidden-headed' && processExists(session.browserPid));
+}
+
+function getBrowserTargetsFromSessions(sessions: LocalBrowserSessionSnapshot[]): BrowserDebugTarget[] {
+    return sessions
+        .map((session) => ({ pid: session.browserPid, port: session.debugPort }))
+        .sort((left, right) => left.pid - right.pid);
+}
+
+function getBrowserRootPidsFromSessions(sessions: LocalBrowserSessionSnapshot[]): number[] {
+    return sessions.map((session) => session.browserPid);
 }
 
 function listRootPids(): number[] {
@@ -226,13 +349,7 @@ function listBrowserRootInfos(): BrowserRootInfo[] {
 }
 
 function listHiddenRootPids(): number[] {
-    const raw = runPowerShell("Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'msedge.exe' -or $_.Name -eq 'chrome.exe') -and $_.CommandLine -match 'mcp-search-' -and $_.CommandLine -match '--remote-debugging-port=' -and $_.CommandLine -match '--window-position=-32000,-32000' -and $_.CommandLine -notmatch '--type=' } | Select-Object -ExpandProperty ProcessId | Sort-Object | ConvertTo-Json -Compress");
-    if (!raw) {
-        return [];
-    }
-
-    const parsed = JSON.parse(raw) as number[] | number;
-    return Array.isArray(parsed) ? parsed : [parsed];
+    return getBrowserRootPidsFromSessions(listHiddenSessionSnapshots());
 }
 
 function diffRoots(nextRoots: number[], previousRoots: number[]): number[] {
@@ -259,28 +376,36 @@ function extractDebugPort(commandLine: string): number | null {
 }
 
 async function listBrowserTabSnapshot(): Promise<BrowserTabSnapshot> {
-    const perRoot = await Promise.all(listBrowserRootInfos().map(async (root) => {
+    return listBrowserTabSnapshotForTargets(listBrowserRootInfos().map((root) => {
         const port = extractDebugPort(root.commandLine);
         if (!port) {
             return null;
         }
 
+        return { pid: root.pid, port } satisfies BrowserDebugTarget;
+    }).filter((target): target is BrowserDebugTarget => target !== null));
+}
+
+async function listBrowserTabSnapshotForTargets(targets: BrowserDebugTarget[]): Promise<BrowserTabSnapshot> {
+    const perRoot = await Promise.all(targets.map(async (target) => {
+        const { pid, port } = target;
+
         try {
             const response = await fetch(`http://127.0.0.1:${port}/json/list`);
             if (!response.ok) {
-                return { pid: root.pid, port, tabCount: 0 };
+                return { pid, port, tabCount: 0 };
             }
 
             const targets = await response.json() as Array<{ type?: string }>;
             return {
-                pid: root.pid,
+                pid,
                 port,
                 tabCount: Array.isArray(targets)
                     ? targets.filter((target) => target?.type === 'page').length
                     : 0
             };
         } catch {
-            return { pid: root.pid, port, tabCount: 0 };
+            return { pid, port, tabCount: 0 };
         }
     }));
 
@@ -561,23 +686,31 @@ async function runHiddenScenario(): Promise<void> {
     const labels = ['phase1', 'phase2', 'phase3'];
     const handles: HiddenRoundHandle[] = [];
     const tabCounts: number[] = [];
+    const initialHiddenSessions = listHiddenSessionSnapshots();
+    const initialHiddenRoots = getBrowserRootPidsFromSessions(initialHiddenSessions);
+    const hiddenChildPids = new Set<number>();
 
     try {
         for (let index = 0; index < phaseQueries.length; index += 1) {
             const label = labels[index];
-            const beforeRoots = listHiddenRootPids();
-            const beforeTabs = await listBrowserTabSnapshot();
+            const beforeSessions = listHiddenSessionSnapshots();
+            const beforeRoots = getBrowserRootPidsFromSessions(beforeSessions);
+            const beforeTabs = await listBrowserTabSnapshotForTargets(getBrowserTargetsFromSessions(beforeSessions));
             console.log(`${label} hidden before roots=${JSON.stringify(beforeRoots)} tabs=${beforeTabs.totalTabs} tabDetails=${JSON.stringify(beforeTabs.perRoot)}`);
 
             const handle = await startHiddenRound(label, phaseQueries[index]);
             handles.push(handle);
+            if (Number.isInteger(handle.process.pid) && handle.process.pid > 0) {
+                hiddenChildPids.add(handle.process.pid);
+            }
 
             for (const result of handle.result.results) {
                 validateSearchResponse(`${label}-hidden`, result);
             }
 
-            const afterRoots = listHiddenRootPids();
-            const afterTabs = await listBrowserTabSnapshot();
+            const afterSessions = listHiddenSessionSnapshots();
+            const afterRoots = getBrowserRootPidsFromSessions(afterSessions);
+            const afterTabs = await listBrowserTabSnapshotForTargets(getBrowserTargetsFromSessions(afterSessions));
             console.log(`${label} hidden after roots=${JSON.stringify(afterRoots)} tabs=${afterTabs.totalTabs} tabDetails=${JSON.stringify(afterTabs.perRoot)}`);
 
             if (index === 0) {
@@ -604,8 +737,27 @@ async function runHiddenScenario(): Promise<void> {
         }
     }
 
-    const rootsAfterClose = listHiddenRootPids();
-    assertCondition(rootsAfterClose.length === 0, `hidden browsers should auto close after all holder processes exit, actual=${JSON.stringify(rootsAfterClose)}`);
+    const remainingHiddenSessions = listHiddenSessionSnapshots();
+    const rootsAfterClose = getBrowserRootPidsFromSessions(remainingHiddenSessions);
+    const leakedRoots = diffRoots(rootsAfterClose, initialHiddenRoots);
+    const leakedChildRegistrations = remainingHiddenSessions
+        .filter((session) => session.clientPids.some((pid) => hiddenChildPids.has(pid)))
+        .map((session) => ({
+            pid: session.browserPid,
+            tempDir: session.tempDir,
+            clientPids: session.clientPids
+        }));
+
+    // 修复隐藏轮次收尾把前半段有头浏览器或既有隐藏会话误算为泄漏的问题：
+    // 这里只要求隐藏场景结束后回到其起始隐藏会话集合，并确认本轮子进程登记已全部释放。
+    assertCondition(
+        rootsEqual(rootsAfterClose, initialHiddenRoots),
+        `hidden browsers should return to the initial hidden root set after all holder processes exit, initial=${JSON.stringify(initialHiddenRoots)} actual=${JSON.stringify(rootsAfterClose)} leaked=${JSON.stringify(leakedRoots)}`
+    );
+    assertCondition(
+        leakedChildRegistrations.length === 0,
+        `hidden browser sessions should unregister hidden round child holders after close, leaked=${JSON.stringify(leakedChildRegistrations)}`
+    );
 }
 
 async function main(): Promise<void> {
