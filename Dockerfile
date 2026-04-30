@@ -8,7 +8,12 @@ WORKDIR /app
 COPY package*.json ./
 
 # 安装依赖
-RUN npm ci || npm install && npm cache clean --force
+# linux/arm64 Alpine 可能没有 koffi 预编译包，需要临时工具链从源码编译 native 模块。
+RUN apk add --no-cache libstdc++ && \
+    apk add --no-cache --virtual .native-build-deps python3 make g++ cmake && \
+    (npm ci || npm install) && \
+    npm cache clean --force && \
+    apk del .native-build-deps
 
 # 拷贝源码
 COPY . .
