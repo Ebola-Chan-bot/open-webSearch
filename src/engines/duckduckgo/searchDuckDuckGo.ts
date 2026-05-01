@@ -3,6 +3,17 @@ import * as cheerio from 'cheerio';
 import {SearchResult} from "../../types.js";
 import {buildAxiosRequestOptions} from "../../utils/httpRequest.js";
 
+function isTrustedDuckDuckGoPreloadUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:'
+      && parsed.hostname === 'links.duckduckgo.com'
+      && parsed.pathname === '/d.js';
+  } catch {
+    return false;
+  }
+}
+
 
 /**
  * Search DuckDuckGo and return results
@@ -34,6 +45,7 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
     try {
       // Configure request options
       const requestOptions = buildAxiosRequestOptions({
+        trustedStaticHost: true,
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
           "Connection": "keep-alive",
@@ -61,7 +73,7 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
       const $ = cheerio.load(response.data);
       $('link[rel="preload"]').each((_, el) => {
         const href = $(el).attr('href');
-        if (href && href.includes('links.duckduckgo.com/d.js')) {
+        if (href && isTrustedDuckDuckGoPreloadUrl(href)) {
           basePreloadUrl = href;
           return false; // 停止循环
         }
@@ -71,7 +83,7 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
       if (!basePreloadUrl) {
         $('#deep_preload_script').each((_, el) => {
           const src = $(el).attr('src');
-          if (src && src.includes('links.duckduckgo.com/d.js')) {
+          if (src && isTrustedDuckDuckGoPreloadUrl(src)) {
             basePreloadUrl = src;
             return false;
           }
@@ -81,7 +93,7 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
       // Method 3: Use regex to extract from entire HTML
       if (!basePreloadUrl) {
         const urlMatch = response.data.match(/https:\/\/links\.duckduckgo\.com\/d\.js\?[^"']+/i);
-        if (urlMatch) {
+        if (urlMatch && isTrustedDuckDuckGoPreloadUrl(urlMatch[0])) {
           basePreloadUrl = urlMatch[0];
         }
       }
@@ -191,6 +203,7 @@ export async function searchDuckDuckGo(query: string, limit: number): Promise<Se
 
     // Configure request options
     const requestOptions = buildAxiosRequestOptions({
+    trustedStaticHost: true,
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       'User-Agent': 'Apifox/1.0.0 (https://apifox.com)',

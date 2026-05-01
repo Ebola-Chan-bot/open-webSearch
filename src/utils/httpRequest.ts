@@ -18,6 +18,7 @@ type BuildAxiosRequestOptions = {
     params?: unknown;
     responseType?: ResponseType;
     timeout?: number;
+    trustedStaticHost?: boolean;
     validateStatus?: AxiosRequestConfig['validateStatus'];
 };
 
@@ -71,6 +72,7 @@ export function buildAxiosRequestOptions(options: BuildAxiosRequestOptions = {})
         params,
         responseType,
         timeout,
+        trustedStaticHost = false,
         validateStatus
     } = options;
 
@@ -84,8 +86,9 @@ export function buildAxiosRequestOptions(options: BuildAxiosRequestOptions = {})
     if (timeout !== undefined) {
         requestOptions.timeout = timeout;
     }
-    if (maxRedirects !== undefined) {
-        requestOptions.maxRedirects = maxRedirects;
+    const effectiveMaxRedirects = trustedStaticHost && maxRedirects === undefined ? 0 : maxRedirects;
+    if (effectiveMaxRedirects !== undefined) {
+        requestOptions.maxRedirects = effectiveMaxRedirects;
     }
     if (responseType !== undefined) {
         requestOptions.responseType = responseType;
@@ -121,6 +124,10 @@ export function buildAxiosRequestOptions(options: BuildAxiosRequestOptions = {})
         const proxyAgent = getProxyAgent(effectiveProxyUrl, allowInsecureTls);
         requestOptions.httpAgent = proxyAgent;
         requestOptions.httpsAgent = proxyAgent;
+    } else if (trustedStaticHost) {
+        // 修复固定域名 axios 请求在部分网络中失败的问题：搜索/API 域名可能解析到
+        // 100.64.0.0/10 这类运营商/代理地址而被 request-filtering-agent 拦截。
+        // 该开关只允许用于调用方生成的固定可信 host，并默认禁用重定向，避免扩大 SSRF 面。
     } else {
         requestOptions.httpAgent = getFilteringHttpAgent();
         requestOptions.httpsAgent = getFilteringHttpsAgent(allowInsecureTls);

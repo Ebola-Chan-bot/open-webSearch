@@ -24,6 +24,13 @@ function main(): void {
         assert((defaultOptions.httpsAgent as any).options.rejectUnauthorized === true, 'direct https agent should enforce TLS verification by default');
         console.log('✅ default request options disable axios env proxy resolution');
 
+        const trustedStaticHostOptions = buildAxiosRequestOptions({ trustedStaticHost: true });
+        assert(trustedStaticHostOptions.proxy === false, 'trusted static host requests should still disable axios env proxy resolution');
+        assert(!trustedStaticHostOptions.httpAgent, 'trusted static host direct requests should not use the filtering http agent');
+        assert(!trustedStaticHostOptions.httpsAgent, 'trusted static host direct requests should not use the filtering https agent');
+        assert(trustedStaticHostOptions.maxRedirects === 0, 'trusted static host requests should disable redirects by default');
+        console.log('✅ trusted static host request options bypass DNS private-network filtering and disable redirects');
+
         const insecureOptions = buildAxiosRequestOptions({ allowInsecureTls: true });
         assert((insecureOptions.httpsAgent as any).options.rejectUnauthorized === false, 'insecure TLS option should disable certificate verification only when requested');
         console.log('✅ insecure TLS option is opt-in');
