@@ -3,11 +3,14 @@ import * as cheerio from 'cheerio';
 import {SearchResult} from "../../types.js";
 import {buildAxiosRequestOptions} from "../../utils/httpRequest.js";
 
-function isTrustedDuckDuckGoPreloadUrl(value: string): boolean {
+export function isTrustedDuckDuckGoPreloadUrl(value: string): boolean {
   try {
     const parsed = new URL(value);
     return parsed.protocol === 'https:'
       && parsed.hostname === 'links.duckduckgo.com'
+      && (parsed.port === '' || parsed.port === '443')
+      && parsed.username === ''
+      && parsed.password === ''
       && parsed.pathname === '/d.js';
   } catch {
     return false;

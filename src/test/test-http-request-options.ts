@@ -31,6 +31,10 @@ function main(): void {
         assert(trustedStaticHostOptions.maxRedirects === 0, 'trusted static host requests should disable redirects by default');
         console.log('✅ trusted static host request options bypass DNS private-network filtering and disable redirects');
 
+        const trustedStaticHostWithRedirects = buildAxiosRequestOptions({ trustedStaticHost: true, maxRedirects: 5 });
+        assert(trustedStaticHostWithRedirects.maxRedirects === 0, 'trusted static host requests should force redirects off even when maxRedirects is provided');
+        console.log('✅ trusted static host request options force redirects off');
+
         const insecureOptions = buildAxiosRequestOptions({ allowInsecureTls: true });
         assert((insecureOptions.httpsAgent as any).options.rejectUnauthorized === false, 'insecure TLS option should disable certificate verification only when requested');
         console.log('✅ insecure TLS option is opt-in');

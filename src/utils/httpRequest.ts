@@ -86,7 +86,7 @@ export function buildAxiosRequestOptions(options: BuildAxiosRequestOptions = {})
     if (timeout !== undefined) {
         requestOptions.timeout = timeout;
     }
-    const effectiveMaxRedirects = trustedStaticHost && maxRedirects === undefined ? 0 : maxRedirects;
+    const effectiveMaxRedirects = trustedStaticHost ? 0 : maxRedirects;
     if (effectiveMaxRedirects !== undefined) {
         requestOptions.maxRedirects = effectiveMaxRedirects;
     }
