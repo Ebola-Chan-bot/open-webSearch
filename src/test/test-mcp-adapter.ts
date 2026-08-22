@@ -432,8 +432,29 @@ function testCustomToolNamesAndFallbacks(): void {
         }
     );
     const invalidPayload = parseJsonBlock(invalidOutput) as { names: string[] };
-    assert(invalidPayload.names.includes('search'), 'invalid custom search tool name should fall back to default');
-    assert(invalidPayload.names.includes('fetchWebContent'), 'invalid custom web fetch tool name should fall back to default');
+    assert(invalidPayload.names.includes('search'), 'invalid custom search tool name should fallback to default');
+    assert(invalidPayload.names.includes('fetchWebContent'), 'invalid custom web fetch tool name should fallback to default');
+    assert(!invalidPayload.names.includes('123bad'), 'invalid custom name should not be registered');
+    assert(!invalidPayload.names.includes('bad name'), 'invalid custom name should not be registered');
+
+    const disabledOutput = runModuleWithEnv(
+        `
+            import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+            const { createOpenWebSearchRuntime } = await import('./build/runtime/createRuntime.js');
+            const { setupTools } = await import('./build/tools/setupTools.js');
+            const runtime = createOpenWebSearchRuntime();
+            const server = new McpServer({ name: 'test', version: '1.0.0' });
+            setupTools(server, runtime);
+            console.log(JSON.stringify({ names: Object.keys(server._registeredTools) }, null, 2));
+        `,
+        {
+            MCP_TOOL_SEARCH_NAME: '<disabled>',
+            MCP_TOOL_FETCH_WEB_NAME: '<disabled>'
+        }
+    );
+    const disabledPayload = parseJsonBlock(disabledOutput) as { names: string[] };
+    assert(!disabledPayload.names.includes('search'), 'disabled search tool should not be registered');
+    assert(!disabledPayload.names.includes('fetchWebContent'), 'disabled web fetch tool should not be registered');
 
     console.log('✅ MCP tool names respect custom overrides and fallback rules');
 }
