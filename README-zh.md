@@ -278,12 +278,12 @@ npx cross-env DEFAULT_SEARCH_ENGINE=duckduckgo ENABLE_CORS=true open-websearch
 | `PLAYWRIGHT_HEADLESS` | `true` | `true`, `false` | Playwright Chromium 是否以无头模式运行 |
 | `PLAYWRIGHT_NAVIGATION_TIMEOUT_MS` | `20000` | 正整数 | Playwright 页面导航和 Bing 结果等待超时时间 |
 | `OPEN_WEBSEARCH_PROFILE_DIR` | `<tmpdir>/open-websearch-browser-profiles` | 任意可写目录 | 本地浏览器持久化 profile 的根目录（见下方“浏览器状态说明”） |
-| `MCP_TOOL_SEARCH_NAME` | `search` | 有效的MCP工具名称 | 搜索工具的自定义名称 |
-| `MCP_TOOL_FETCH_LINUXDO_NAME` | `fetchLinuxDoArticle` | 有效的MCP工具名称 | Linux.do文章获取工具的自定义名称 |
-| `MCP_TOOL_FETCH_CSDN_NAME` | `fetchCsdnArticle` | 有效的MCP工具名称 | CSDN文章获取工具的自定义名称 |
-| `MCP_TOOL_FETCH_GITHUB_NAME` | `fetchGithubReadme` | 有效的MCP工具名称 | GitHub README获取工具的自定义名称 |
-| `MCP_TOOL_FETCH_JUEJIN_NAME` | `fetchJuejinArticle` | 有效的MCP工具名称 | 掘金文章获取工具的自定义名称 |
-| `MCP_TOOL_FETCH_WEB_NAME` | `fetchWebContent` | 有效的MCP工具名称 | 通用网页/Markdown抓取工具的自定义名称 |
+| `MCP_TOOL_SEARCH_NAME` | `search` | 有效的MCP工具名称 | 搜索工具的自定义名称；设为 `<disabled>`（bash/zsh 中需引号 `'<disabled>'`，Windows cmd 中需双引号 `"<disabled>"`）可禁用该工具。无效名称会回退到默认值并给出警告
+| `MCP_TOOL_FETCH_LINUXDO_NAME` | `fetchLinuxDoArticle` | 有效的MCP工具名称 | Linux.do文章获取工具的自定义名称；设为 `<disabled>`（bash/zsh 中需引号 `'<disabled>'`，Windows cmd 中需双引号 `"<disabled>"`）可禁用该工具。无效名称会回退到默认值并给出警告
+| `MCP_TOOL_FETCH_CSDN_NAME` | `fetchCsdnArticle` | 有效的MCP工具名称 | CSDN文章获取工具的自定义名称；设为 `<disabled>`（bash/zsh 中需引号 `'<disabled>'`，Windows cmd 中需双引号 `"<disabled>"`）可禁用该工具。无效名称会回退到默认值并给出警告
+| `MCP_TOOL_FETCH_GITHUB_NAME` | `fetchGithubReadme` | 有效的MCP工具名称 | GitHub README获取工具的自定义名称；设为 `<disabled>`（bash/zsh 中需引号 `'<disabled>'`，Windows cmd 中需双引号 `"<disabled>"`）可禁用该工具。无效名称会回退到默认值并给出警告
+| `MCP_TOOL_FETCH_JUEJIN_NAME` | `fetchJuejinArticle` | 有效的MCP工具名称 | 掘金文章获取工具的自定义名称；设为 `<disabled>`（bash/zsh 中需引号 `'<disabled>'`，Windows cmd 中需双引号 `"<disabled>"`）可禁用该工具。无效名称会回退到默认值并给出警告
+| `MCP_TOOL_FETCH_WEB_NAME` | `fetchWebContent` | 有效的MCP工具名称 | 通用网页/Markdown抓取工具的自定义名称；设为 `<disabled>`（bash/zsh 中需引号 `'<disabled>'`，Windows cmd 中需双引号 `"<disabled>"`）可禁用该工具。无效名称会回退到默认值并给出警告
 
 **常用配置示例：**
 ```bash
@@ -299,9 +299,16 @@ SEARCH_MODE=auto npx open-websearch@latest
 # 强制仅使用请求模式
 SEARCH_MODE=request npx open-websearch@latest
 
+# 将搜索工具重命名为 webSearch
+MCP_TOOL_SEARCH_NAME=webSearch npx open-websearch@latest
+
+# 禁用搜索工具
+MCP_TOOL_SEARCH_NAME='<disabled>' npx open-websearch@latest
+
 # 完整配置
 DEFAULT_SEARCH_ENGINE=duckduckgo ENABLE_CORS=true USE_PROXY=true PROXY_URL=http://127.0.0.1:7890 PORT=8080 npx open-websearch@latest
 ```
+> **注意：** `<disabled>` 包含 shell 特殊字符。bash/zsh 中需用单引号 `'<disabled>'`，Windows cmd 中需用双引号 `"<disabled>"`。
 
 浏览器增强 Bing 兜底现在是显式启用，不随发行包默认安装。你可以按下面几种方式手动启用：
 

@@ -189,12 +189,12 @@ npx cross-env DEFAULT_SEARCH_ENGINE=duckduckgo ENABLE_CORS=true open-websearch
 | `PLAYWRIGHT_HEADLESS` | `true` | `true`, `false` | Whether Playwright Chromium runs in headless mode |
 | `PLAYWRIGHT_NAVIGATION_TIMEOUT_MS` | `20000` | Positive integer | Timeout for Playwright navigation and Bing result waits |
 | `OPEN_WEBSEARCH_PROFILE_DIR` | `<tmpdir>/open-websearch-browser-profiles` | Any writable directory | Base directory for persistent local browser profiles (see browser state note below) |
-| `MCP_TOOL_SEARCH_NAME` | `search` | Valid MCP tool name | Custom name for the search tool |
-| `MCP_TOOL_FETCH_LINUXDO_NAME` | `fetchLinuxDoArticle` | Valid MCP tool name | Custom name for the Linux.do article fetch tool |
-| `MCP_TOOL_FETCH_CSDN_NAME` | `fetchCsdnArticle` | Valid MCP tool name | Custom name for the CSDN article fetch tool |
-| `MCP_TOOL_FETCH_GITHUB_NAME` | `fetchGithubReadme` | Valid MCP tool name | Custom name for the GitHub README fetch tool |
-| `MCP_TOOL_FETCH_JUEJIN_NAME` | `fetchJuejinArticle` | Valid MCP tool name | Custom name for the Juejin article fetch tool |
-| `MCP_TOOL_FETCH_WEB_NAME` | `fetchWebContent` | Valid MCP tool name | Custom name for generic web/Markdown fetch tool |
+| `MCP_TOOL_SEARCH_NAME` | `search` | Valid MCP tool name | Custom name for the search tool; set to `<disabled>` (quote as `'<disabled>'` in bash/zsh, `"<disabled>"` in Windows cmd) to disable the tool. Invalid names fallback to default with a warning
+| `MCP_TOOL_FETCH_LINUXDO_NAME` | `fetchLinuxDoArticle` | Valid MCP tool name | Custom name for the Linux.do article fetch tool; set to `<disabled>` (quote as `'<disabled>'` in bash/zsh, `"<disabled>"` in Windows cmd) to disable the tool. Invalid names fallback to default with a warning
+| `MCP_TOOL_FETCH_CSDN_NAME` | `fetchCsdnArticle` | Valid MCP tool name | Custom name for the CSDN article fetch tool; set to `<disabled>` (quote as `'<disabled>'` in bash/zsh, `"<disabled>"` in Windows cmd) to disable the tool. Invalid names fallback to default with a warning
+| `MCP_TOOL_FETCH_GITHUB_NAME` | `fetchGithubReadme` | Valid MCP tool name | Custom name for the GitHub README fetch tool; set to `<disabled>` (quote as `'<disabled>'` in bash/zsh, `"<disabled>"` in Windows cmd) to disable the tool. Invalid names fallback to default with a warning
+| `MCP_TOOL_FETCH_JUEJIN_NAME` | `fetchJuejinArticle` | Valid MCP tool name | Custom name for the Juejin article fetch tool; set to `<disabled>` (quote as `'<disabled>'` in bash/zsh, `"<disabled>"` in Windows cmd) to disable the tool. Invalid names fallback to default with a warning
+| `MCP_TOOL_FETCH_WEB_NAME` | `fetchWebContent` | Valid MCP tool name | Custom name for generic web/Markdown fetch tool; set to `<disabled>` (quote as `'<disabled>'` in bash/zsh, `"<disabled>"` in Windows cmd) to disable the tool. Invalid names fallback to default with a warning
 
 **Common configurations:**
 ```bash
@@ -210,9 +210,16 @@ SEARCH_MODE=auto npx open-websearch@latest
 # Force request-only Bing search
 SEARCH_MODE=request npx open-websearch@latest
 
+# Rename search tool to webSearch
+MCP_TOOL_SEARCH_NAME=webSearch npx open-websearch@latest
+
+# Disable search tool
+MCP_TOOL_SEARCH_NAME='<disabled>' npx open-websearch@latest
+
 # Full configuration
 DEFAULT_SEARCH_ENGINE=duckduckgo ENABLE_CORS=true USE_PROXY=true PROXY_URL=http://127.0.0.1:7890 PORT=8080 npx open-websearch@latest
 ```
+> **Note:** The `<disabled>` sentinel contains shell-special characters. In bash/zsh, quote it as `'<disabled>'`; in Windows cmd, use double quotes `"<disabled>"`.
 
 Browser-enhanced Bing fallback is opt-in. The published package does not bundle Playwright anymore. Enable it manually with one of these setups:
 
