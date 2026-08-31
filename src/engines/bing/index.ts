@@ -1,1 +1,1 @@
-export { searchBing } from './bing.js';
+export { __setBingHttpGetForTests, searchBing } from './bing.js';

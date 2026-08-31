@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import * as cheerio from 'cheerio';
 import { AppConfig, config, getEffectiveSearchMode, checkPlaywrightModeConfiguration } from '../../config.js';
 import { SearchResult } from '../../types.js';
@@ -8,6 +9,8 @@ import { buildAxiosRequestOptions as buildSharedAxiosRequestOptions } from '../.
 
 const BING_BASE_URL = 'https://cn.bing.com/search';
 const BING_HOME_URL = 'https://www.bing.com/?mkt=zh-CN';
+const BING_REGIONAL_HOSTS = new Set(['cn.bing.com', 'www.bing.com']);
+const BING_MAX_REGIONAL_REDIRECTS = 1;
 const BROWSER_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const SEARCH_INPUT_SELECTORS = [
     'input[name="q"]',
@@ -56,6 +59,14 @@ const BROWSER_CONTEXT_OPTIONS = {
     deviceScaleFactor: 1,
     colorScheme: 'light'
 };
+
+type BingHttpGet = (url: string, options: AxiosRequestConfig) => Promise<AxiosResponse>;
+
+let bingHttpGet: BingHttpGet = (url, options) => axios.get(url, options);
+
+export function __setBingHttpGetForTests(impl?: BingHttpGet): void {
+    bingHttpGet = impl ?? ((url, options) => axios.get(url, options));
+}
 
 export function hasSiteOperator(query: string): boolean {
     return /(^|\s)site:[^\s]+/i.test(query);
@@ -120,8 +131,48 @@ function buildBingAxiosRequestOptions(): any {
     return buildSharedAxiosRequestOptions({
         trustedStaticHost: true,
         headers: FALLBACK_HEADERS,
-        timeout: config.playwrightNavigationTimeoutMs
+        timeout: config.playwrightNavigationTimeoutMs,
+        validateStatus: (status) => status >= 200 && status < 400
     });
+}
+
+function resolveBingRegionalRedirect(currentUrl: string, location: unknown): string {
+    if (typeof location !== 'string' || !location.trim()) {
+        throw new Error('Bing returned a redirect without a Location header');
+    }
+
+    const redirectUrl = new URL(location, currentUrl);
+    const hostname = redirectUrl.hostname.toLowerCase();
+    if (
+        redirectUrl.protocol !== 'https:'
+        || (redirectUrl.port && redirectUrl.port !== '443')
+        || redirectUrl.username
+        || redirectUrl.password
+        || !BING_REGIONAL_HOSTS.has(hostname)
+    ) {
+        throw new Error(`Bing redirected to an unsupported target: ${redirectUrl.toString()}`);
+    }
+
+    return redirectUrl.toString();
+}
+
+async function requestBingSearchPage(initialUrl: string): Promise<AxiosResponse> {
+    let currentUrl = initialUrl;
+
+    for (let redirectCount = 0; redirectCount <= BING_MAX_REGIONAL_REDIRECTS; redirectCount += 1) {
+        const response = await bingHttpGet(currentUrl, buildBingAxiosRequestOptions());
+        if (response.status < 300 || response.status >= 400) {
+            return response;
+        }
+
+        if (redirectCount === BING_MAX_REGIONAL_REDIRECTS) {
+            throw new Error(`Bing exceeded the regional redirect limit (${BING_MAX_REGIONAL_REDIRECTS})`);
+        }
+
+        currentUrl = resolveBingRegionalRedirect(currentUrl, response.headers?.location);
+    }
+
+    throw new Error('Bing request did not produce a final response');
 }
 
 let playwrightAvailabilityPromise: Promise<boolean> | null = null;
@@ -598,7 +649,7 @@ async function searchBingWithHttp(query: string, limit: number): Promise<SearchR
     let pageNumber = 0;
 
     while (allResults.length < limit) {
-        const response = await axios.get(buildBingSearchUrl(query, pageNumber), buildBingAxiosRequestOptions());
+        const response = await requestBingSearchPage(buildBingSearchUrl(query, pageNumber));
         const html = String(response.data || '');
 
         const pageState = analyzeBlockedPage(html);

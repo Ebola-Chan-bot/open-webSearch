@@ -35,6 +35,15 @@ function main(): void {
         assert(trustedStaticHostOptions.maxRedirects === 0, 'trusted static host requests should force redirects off');
         console.log('✅ trusted static host request options bypass DNS private-network filtering and force redirects off');
 
+        const tlsBoundTrustedStaticHostOptions = buildAxiosRequestOptions({
+            trustedStaticHost: true,
+            tlsMaxVersion: 'TLSv1.2'
+        });
+        assert(tlsBoundTrustedStaticHostOptions.httpsAgent instanceof https.Agent, 'TLS-bound trusted static host requests should use a direct https agent');
+        assert((tlsBoundTrustedStaticHostOptions.httpsAgent as any).options.maxVersion === 'TLSv1.2', 'TLS-bound trusted static host agent should enforce the requested maximum TLS version');
+        assert((tlsBoundTrustedStaticHostOptions.httpsAgent as any).options.rejectUnauthorized === true, 'TLS-bound trusted static host agent should keep certificate verification enabled');
+        console.log('✅ trusted static host TLS version bounds are explicit and secure by default');
+
         const trustedStaticHostWithRedirects = buildAxiosRequestOptions({ trustedStaticHost: true, maxRedirects: 5 });
         assert(trustedStaticHostWithRedirects.maxRedirects === 0, 'trusted static host requests should force redirects off even when maxRedirects is provided');
         console.log('✅ trusted static host request options force redirects off');

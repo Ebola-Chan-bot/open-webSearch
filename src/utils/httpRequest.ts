@@ -19,6 +19,7 @@ type BuildAxiosRequestOptions = {
     params?: unknown;
     responseType?: ResponseType;
     timeout?: number;
+    tlsMaxVersion?: https.AgentOptions['maxVersion'];
     trustedStaticHost?: boolean;
     validateStatus?: AxiosRequestConfig['validateStatus'];
 };
@@ -27,6 +28,7 @@ const filteringHttpAgents = new Map<string, RequestFilteringHttpAgent>();
 const secureFilteringHttpsAgents = new Map<string, RequestFilteringHttpsAgent>();
 const insecureFilteringHttpsAgents = new Map<string, RequestFilteringHttpsAgent>();
 let insecureTrustedStaticHttpsAgent: https.Agent | null = null;
+const versionBoundTrustedStaticHttpsAgents = new Map<string, https.Agent>();
 const proxyAgents = new Map<string, HttpsProxyAgent<string>>();
 
 function buildFakeIpAgentCacheKey(): string {
@@ -86,6 +88,24 @@ function getInsecureTrustedStaticHttpsAgent(): https.Agent {
     return insecureTrustedStaticHttpsAgent;
 }
 
+function getVersionBoundTrustedStaticHttpsAgent(
+    maxVersion: NonNullable<https.AgentOptions['maxVersion']>,
+    allowInsecureTls: boolean
+): https.Agent {
+    const cacheKey = `${maxVersion}::${allowInsecureTls ? 'insecure' : 'secure'}`;
+    const cachedAgent = versionBoundTrustedStaticHttpsAgents.get(cacheKey);
+    if (cachedAgent) {
+        return cachedAgent;
+    }
+
+    const agent = new https.Agent({
+        maxVersion,
+        rejectUnauthorized: !allowInsecureTls
+    });
+    versionBoundTrustedStaticHttpsAgents.set(cacheKey, agent);
+    return agent;
+}
+
 export function buildAxiosRequestOptions(options: BuildAxiosRequestOptions = {}): AxiosRequestConfig {
     const {
         allowInsecureTls = false,
@@ -97,6 +117,7 @@ export function buildAxiosRequestOptions(options: BuildAxiosRequestOptions = {})
         params,
         responseType,
         timeout,
+        tlsMaxVersion,
         trustedStaticHost = false,
         validateStatus
     } = options;
@@ -153,7 +174,9 @@ export function buildAxiosRequestOptions(options: BuildAxiosRequestOptions = {})
         // 修复固定域名 axios 请求在部分网络中失败的问题：搜索/API 域名可能解析到
         // 100.64.0.0/10 这类运营商/代理地址而被 request-filtering-agent 拦截。
         // 该开关只允许用于调用方生成的固定可信 host，并强制禁用重定向，避免扩大 SSRF 面。
-        if (allowInsecureTls) {
+        if (tlsMaxVersion) {
+            requestOptions.httpsAgent = getVersionBoundTrustedStaticHttpsAgent(tlsMaxVersion, allowInsecureTls);
+        } else if (allowInsecureTls) {
             requestOptions.httpsAgent = getInsecureTrustedStaticHttpsAgent();
         }
     } else {
