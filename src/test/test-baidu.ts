@@ -1,4 +1,5 @@
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
+import https from 'node:https';
 import { __setBaiduHttpGetForTests, parseBaiduSearchResults, searchBaidu } from '../engines/baidu/index.js';
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -98,8 +99,10 @@ async function testSearchBaiduDetectsCaptchaRedirect(): Promise<void> {
 
 async function testSearchBaiduParsesResults(): Promise<void> {
     const requestedUrls: string[] = [];
-    __setBaiduHttpGetForTests(async (url: string, _options: AxiosRequestConfig) => {
+    const requestedOptions: AxiosRequestConfig[] = [];
+    __setBaiduHttpGetForTests(async (url: string, options: AxiosRequestConfig) => {
         requestedUrls.push(url);
+        requestedOptions.push(options);
         return makeResponse(
             200,
             {},
@@ -121,6 +124,9 @@ async function testSearchBaiduParsesResults(): Promise<void> {
         assert(requestedUrls.length === 1, 'Baidu search should make one request');
         assert(requestedUrls[0].startsWith('https://www.baidu.com/s?'), 'request should use Baidu search endpoint');
         assert(requestedUrls[0].includes('tn=88093251_62_hao_pg'), 'request should carry the stable hao123 tn');
+        assert(requestedOptions[0].httpsAgent instanceof https.Agent, 'Baidu search should use a dedicated https agent');
+        assert((requestedOptions[0].httpsAgent as any).options.maxVersion === 'TLSv1.2', 'Baidu search should omit TLS 1.3 from negotiation for incompatible CDN edges');
+        assert((requestedOptions[0].httpsAgent as any).options.rejectUnauthorized === true, 'Baidu TLS compatibility agent should keep certificate verification enabled');
         console.log('✅ Baidu search parses results and keeps the stable tn');
     } finally {
         __setBaiduHttpGetForTests();

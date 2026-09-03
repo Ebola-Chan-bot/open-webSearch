@@ -24,6 +24,7 @@
     "test": "tsc && node build/tools/runCurrentTests.js",
     "test:list": "tsc && node build/tools/runCurrentTests.js --list",
     "test:bing-parser": "tsc && node build/test/test-bing-parser.js",
+    "test:bing-http": "tsc && node build/test/test-bing-http.js",
     "test:cli": "tsc && node build/test/test-cli-search.js",
     "test:cli-search": "tsc && node build/test/test-cli-search.js",
     "test:core-search": "tsc && node build/test/test-core-search.js",

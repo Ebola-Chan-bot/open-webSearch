@@ -97,6 +97,9 @@ async function searchBaiduPage(query: string, page: number): Promise<SearchResul
     // 避免把 wappass 验证码跳转误当成正常结果页解析出 0 条。
     const response = await baiduHttpGet(url.toString(), buildAxiosRequestOptions({
         trustedStaticHost: true,
+        // 部分百度 CDN 边缘路径在默认 TLS 协商时会重置连接；仅在百度请求中排除
+        // TLS 1.3 提议，避免降低其他固定可信域名的 TLS 能力。
+        tlsMaxVersion: 'TLSv1.2',
         headers: COMMON_HEADERS,
         timeout: 20000,
         validateStatus: (status) => status >= 200 && status < 400,
